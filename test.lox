@@ -1,0 +1,20 @@
+var x = 25;
+class Bagel {
+	eat() {
+		print "nom nom nom";
+	}
+}
+%
+var b = Bagel();
+
+for var i = 0; i < 10; i = i + 1 {
+	b.eat();
+}
+
+while true {
+	if !false {
+		print nil;
+	}
+}
+
+var y = 6 * 12 + "name" / 1.2;
