@@ -1,3 +1,4 @@
+#[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     // single char tokens
@@ -49,6 +50,9 @@ pub enum TokenKind {
     //other
     Error,
     Eof,
+
+    // sentinel for maintaining a count of possibilities
+    Count,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +142,7 @@ impl<'a> Lexer<'a> {
                 '"' => return self.string_token(),
                 '0'..='9' => return self.number_token(),
                 'a'..='z' | 'A'..='Z' | '_' => return self.ident_token(),
-                _ => return self.error_token("Unrecognized character")
+                _ => return self.error_token("Unrecognized character"),
             }
         }
     }
@@ -180,7 +184,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn peek(&self) -> char {
+    pub fn peek(&self) -> char {
         if self.current >= self.source.len() {
             return '\0';
         }
@@ -278,8 +282,7 @@ impl<'a> Lexer<'a> {
         TokenKind::Identifier
     }
 
-    fn error_token(&self, lexeme: &str) -> Token
-    {
+    fn error_token(&self, lexeme: &str) -> Token {
         Token {
             kind: TokenKind::Error,
             lexeme: lexeme.to_string(),

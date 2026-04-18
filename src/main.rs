@@ -15,15 +15,22 @@ struct Cli {
     /// tracing enabled
     #[arg(short, long)]
     tracing: bool,
+
+    /// debug print enabled
+    #[arg(short, long)]
+    debug: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut vm = if cli.tracing {
-        Vm::new().with_tracing()
-    } else {
-        Vm::new()
-    };
+    let mut vm = Vm::new();
+
+    if cli.debug {
+        vm = vm.with_debug();
+    }
+    if cli.tracing {
+        vm = vm.with_tracing();
+    }
 
     if let Some(path) = cli.filename {
         run_file(path, &mut vm)?;
@@ -49,7 +56,6 @@ pub fn repl(vm: &mut Vm) -> Result<()> {
             InterpretResult::RuntimeError => std::process::exit(70),
             InterpretResult::Ok => {}
         }
-        writeln!(stdout, "")?;
         write!(stdout, "> ")?;
         stdout.flush()?;
         buf.clear();

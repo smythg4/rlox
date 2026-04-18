@@ -4,11 +4,22 @@ use crate::value::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCode {
     Constant,
+    Nil,
+    True,
+    False,
+    Pop,
+    GetGlobal,
+    DefineGlobal,
+    Equal,
+    Greater,
+    Less,
     Add,
     Subtract,
     Multiply,
     Divide,
+    Not,
     Negate,
+    Print,
     Return,
 }
 
@@ -61,8 +72,17 @@ impl Chunk {
         }
         let op_code = OpCode::from(self.codes[offset]);
         match op_code {
-            OpCode::Return => offset + self.simple_instruction(offset),
-            OpCode::Constant => offset + self.constant_instruction(offset),
+            OpCode::Return
+            | OpCode::False
+            | OpCode::True
+            | OpCode::Nil
+            | OpCode::Not
+            | OpCode::Equal
+            | OpCode::Greater
+            | OpCode::Less
+            | OpCode::Print
+            | OpCode::Pop => offset + self.simple_instruction(offset),
+            OpCode::Constant | OpCode::DefineGlobal | OpCode::GetGlobal => offset + self.constant_instruction(offset),
             OpCode::Negate | OpCode::Divide | OpCode::Multiply | OpCode::Subtract | OpCode::Add => {
                 offset + self.simple_instruction(offset)
             }
@@ -86,7 +106,11 @@ impl Chunk {
     }
 
     pub fn add_constant(&mut self, constant: Value) -> u8 {
-        assert!(self.constants.len() <= u8::MAX as usize, "constant overflow! Max constant count is {}", u8::MAX);
+        assert!(
+            self.constants.len() <= u8::MAX as usize,
+            "constant overflow! Max constant count is {}",
+            u8::MAX
+        );
         let i = self.constants.len() as u8;
         self.constants.push(constant);
         i
