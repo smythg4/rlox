@@ -1,16 +1,15 @@
-var x = 5;
-var y = 10;
+var name = "world";
 
-print "x: ";
-print x;
-print "y: ";
-print y;
-
-if (x<y) {
-	print "x is less than y";
-} else {
-print "y is less than x";
+{
+  var greeting = "Hello, " + name + "!";
+  print greeting;
 }
-if (y>x) {
-	print "y is greater than x";
+
+var x = 10;
+var y = 3;
+
+if (x > y) {
+  print x - y;
+} else {
+  print y - x;
 }
