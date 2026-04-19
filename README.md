@@ -2,7 +2,7 @@
 
 A Rust implementation of the Lox bytecode VM, following Part III of Bob Nystrom's [*Crafting Interpreters*](https://craftinginterpreters.com).
 
-Lox is a dynamically typed scripting language. clox is its bytecode-compiled implementation. This is that, but in Rust, so it's called rlox.
+Lox is a dynamically typed scripting language. clox is its bytecode-compiled implementation written in C. This is that, but in Rust so I called it rlox. Very original, no?
 
 ## Example
 
@@ -31,10 +31,13 @@ if (x > 0 or y > 100) {
   print "x is positive";
 }
 
-var i = 0;
-while (i < 5) {
-  i = i + 1;
-  print i;
+var w = 0;
+while (w < 6) {
+  for (var f = 10; f < 14 and w < 3; f = f + 1) {
+    print f;
+  }
+  w = w + 1;
+  print w;
 }
 ```
 
@@ -43,11 +46,24 @@ Hello, world!
 7
 both positive
 x is positive
+10
+11
+12
+13
 1
+10
+11
+12
+13
 2
+10
+11
+12
+13
 3
 4
 5
+6
 ```
 
 ## Building
@@ -88,14 +104,13 @@ rlox --debug test.lox
 - String concatenation and interning
 - Global and local variables with block scoping
 - `if` / `else`
-- `while` loops
+- `while` and `for` loops
 - Logical `and` / `or` (short-circuit evaluation)
 - `print` statement
 - Panic-mode error recovery with synchronization
 
 **In progress**
 
-- `for` loops
 - Functions and closures
 - Classes and inheritance
 - Mark-and-sweep garbage collection (linked list infrastructure is in place)

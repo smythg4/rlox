@@ -42,3 +42,13 @@ while (i < 5) {
   i = i + 1;
   print i;
 }
+
+// for loop with and condition, nested in while
+var w = 0;
+while (w < 6) {
+  for (var f = 10; f < 14 and w < 3; f = f + 1) {
+    print f;
+  }
+  w = w + 1;
+  print w;
+}

@@ -271,6 +271,62 @@ impl<'a> Compiler<'a> {
         self.emit_byte(OpCode::Pop as u8); // if the condition was falsey, we pop it off the stack at beginning of the else branch
     }
 
+    fn for_statement(&mut self) {
+        // start a scope to hold the loop variables for the body to see
+        self.begin_scope();
+        self.consume(TokenKind::LeftParen, "Expect a '(' after 'for'.");
+        // compile the initializer expression
+        if self.peek_match(TokenKind::Semicolon) {
+            // no initializer
+        } else if self.peek_match(TokenKind::Var) {
+            self.var_declaration();
+        } else {
+            self.expression_statement();
+        }
+        // mark the top of the loop, right at the condition clause (initializer is one time and done)
+        let mut loop_start = self.compiling_chunk.codes.len();
+
+        let mut exit_jump = None;
+        // compile the condition expression
+        if self.peek_match(TokenKind::Semicolon) {
+            // no condition
+        } else {
+            self.expression(); // compile the conditional
+            self.consume(TokenKind::Semicolon, "Expect ';' after loop condition.");
+
+            // jump out of the loop if the condition is false
+            exit_jump = Some(self.emit_jump(OpCode::JumpIfFalse));
+            self.emit_byte(OpCode::Pop as u8); // pop the condition if true off the stack
+        }
+
+        // compile the increment clause
+        // Since increment happens after loop body, we jump over it, run the body, then jump back to it
+        if self.peek_match(TokenKind::RightParen) {
+            // no increment
+        } else {
+            let body_jump = self.emit_jump(OpCode::Jump);
+            let increment_start = self.compiling_chunk.codes.len();
+            self.expression();
+            self.emit_byte(OpCode::Pop as u8); // discards the value of the increment
+            self.consume(TokenKind::RightParen, "Expect a ')' after for clauses");
+
+            self.emit_loop(loop_start); // jump to start of loop condition
+            loop_start = increment_start; // tell loop to return to the increment clause after the body instead of the top of the loop
+            self.patch_jump(body_jump);
+        }
+
+        self.statement();
+        self.emit_loop(loop_start);
+
+        if let Some(pos) = exit_jump {
+            // only happens when a condition is present, patches the jump position and pops the stack
+            self.patch_jump(pos);
+            self.emit_byte(OpCode::Pop as u8); // pop the condition if false off the stack
+        }
+
+        self.end_scope();
+    }
+
     fn declaration(&mut self) {
         if self.peek_match(TokenKind::Var) {
             self.var_declaration();
@@ -301,8 +357,6 @@ impl<'a> Compiler<'a> {
     }
 
     fn statement(&mut self) {
-        // TODO: Eliminate `peek_match` unless you find a good use case now that we're shifting
-        // to a match paradigm.
         match self.current.kind {
             TokenKind::Print => {
                 self.advance();
@@ -315,6 +369,10 @@ impl<'a> Compiler<'a> {
             TokenKind::While => {
                 self.advance();
                 self.while_statement();
+            }
+            TokenKind::For => {
+                self.advance();
+                self.for_statement();
             }
             TokenKind::LeftBrace => {
                 self.advance();
