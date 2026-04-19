@@ -42,6 +42,8 @@ impl From<TokenKind> for Precedence {
             | TokenKind::GreaterEqual
             | TokenKind::Less
             | TokenKind::LessEqual => Precedence::Comparison,
+            TokenKind::And => Precedence::And,
+            TokenKind::Or => Precedence::Or,
             _ => Precedence::None,
         }
     }
@@ -201,7 +203,20 @@ impl<'a> Compiler<'a> {
             self.error("Too much code to jump over.".to_string());
         }
         self.compiling_chunk.codes[offset] = (jump >> 8) as u8;
-        self.compiling_chunk.codes[offset+1] = jump as u8;
+        self.compiling_chunk.codes[offset + 1] = jump as u8;
+    }
+
+    fn emit_loop(&mut self, loop_start: usize) {
+        self.emit_byte(OpCode::Loop as u8);
+
+        let offset = self.compiling_chunk.codes.len() - loop_start + 2;
+        if offset > u16::MAX as usize {
+            self.error("Loop body too large".into());
+        }
+
+        let bh = (offset >> 8) as u8;
+        let bl = offset as u8;
+        self.emit_bytes(bh, bl);
     }
 
     fn end_compiler(&mut self) {
@@ -239,6 +254,21 @@ impl<'a> Compiler<'a> {
             self.statement();
         }
         self.patch_jump(else_jump);
+    }
+
+    fn while_statement(&mut self) {
+        let loop_start = self.compiling_chunk.codes.len();
+        self.consume(TokenKind::LeftParen, "Expect a '(' after 'while'.");
+        self.expression();
+        self.consume(TokenKind::RightParen, "Expect a ')' after condition.");
+
+        let exit_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_byte(OpCode::Pop as u8); // if the condition was truthy, we pop it off the stack right before the then branch
+        self.statement();
+        self.emit_loop(loop_start);
+
+        self.patch_jump(exit_jump);
+        self.emit_byte(OpCode::Pop as u8); // if the condition was falsey, we pop it off the stack at beginning of the else branch
     }
 
     fn declaration(&mut self) {
@@ -281,6 +311,10 @@ impl<'a> Compiler<'a> {
             TokenKind::If => {
                 self.advance();
                 self.if_statement();
+            }
+            TokenKind::While => {
+                self.advance();
+                self.while_statement();
             }
             TokenKind::LeftBrace => {
                 self.advance();
@@ -361,8 +395,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn number(&mut self) {
-        let value = self.previous.lexeme.parse::<f64>().unwrap();
-        self.emit_constant(Value::Number(value));
+        if let Ok(value) = self.previous.lexeme.parse::<f64>() {
+            self.emit_constant(Value::Number(value));
+        } else {
+            self.error(format!("invalid number literal '{}'", self.previous.lexeme));
+        }
     }
 
     fn string(&mut self) {
@@ -474,6 +511,8 @@ impl<'a> Compiler<'a> {
             | TokenKind::GreaterEqual
             | TokenKind::Less
             | TokenKind::LessEqual => self.binary(),
+            TokenKind::And => self._and(),
+            TokenKind::Or => self.or_(),
             _ => {}
         }
     }
@@ -515,6 +554,26 @@ impl<'a> Compiler<'a> {
             return;
         }
         self.emit_bytes(OpCode::DefineGlobal as u8, global);
+    }
+
+    fn _and(&mut self) {
+        let end_jump = self.emit_jump(OpCode::JumpIfFalse);
+
+        self.emit_byte(OpCode::Pop as u8);
+        self.parse_precedence(Precedence::And); // could also use Precedence::from(self.previous.kind)
+
+        self.patch_jump(end_jump);
+    }
+
+    fn or_(&mut self) {
+        let else_jump = self.emit_jump(OpCode::JumpIfFalse);
+        let end_jump = self.emit_jump(OpCode::Jump);
+
+        self.patch_jump(else_jump);
+        self.emit_byte(OpCode::Pop as u8);
+
+        self.parse_precedence(Precedence::Or); // could also use Precedence::from(self.previous.kind)
+        self.patch_jump(end_jump);
     }
 
     fn identifier_constant(&mut self, token: Token) -> u8 {

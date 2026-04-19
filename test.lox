@@ -13,3 +13,32 @@ if (x > y) {
 } else {
   print y - x;
 }
+
+// and: both must be true
+if (x > 0 and y > 0) {
+  print "both positive";
+}
+
+// and: short-circuits on false left
+if (x < 0 and y > 0) {
+  print "unreachable";
+} else {
+  print "x is not positive";
+}
+
+// or: short-circuits on true left
+if (x > 0 or y > 100) {
+  print "x is positive";
+}
+
+// or: falls through to right when left is false
+if (x < 0 or y > 0) {
+  print "y is positive";
+}
+
+// while loop
+var i = 0;
+while (i < 5) {
+  i = i + 1;
+  print i;
+}

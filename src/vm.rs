@@ -81,9 +81,12 @@ impl Vm {
     }
 
     fn read_short(&mut self) -> u16 {
-        assert!(self.ip < self.chunk.codes.len()-1, "can't read two bytes when ip is so high");
+        assert!(
+            self.ip < self.chunk.codes.len() - 1,
+            "can't read two bytes when ip is so high"
+        );
         let bh = self.chunk.codes[self.ip] as u16;
-        let bl = self.chunk.codes[self.ip+1] as u16;
+        let bl = self.chunk.codes[self.ip + 1] as u16;
         let val = bh << 8 | bl;
         self.ip += 2;
         val
@@ -107,13 +110,17 @@ impl Vm {
                     // unconditional jump
                     let offset = self.read_short() as usize;
                     self.ip += offset;
-                },
+                }
                 OpCode::JumpIfFalse => {
                     let offset = self.read_short() as usize;
                     if self.is_falsey(*self.peek_stack(0)) {
                         self.ip += offset;
                     }
-                },
+                }
+                OpCode::Loop => {
+                    let offset = self.read_short() as usize;
+                    self.ip -= offset;
+                }
                 OpCode::Return => {
                     // let popped = self.stack.pop().unwrap();
                     // println!("{popped}");

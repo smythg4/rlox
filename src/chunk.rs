@@ -25,6 +25,7 @@ pub enum OpCode {
     Print,
     Jump,
     JumpIfFalse,
+    Loop,
     Return,
 }
 
@@ -97,6 +98,7 @@ impl Chunk {
             | OpCode::Add => offset + self.simple_instruction(offset),
             OpCode::GetLocal | OpCode::SetLocal => offset + self.byte_instruction(offset),
             OpCode::Jump | OpCode::JumpIfFalse => offset + self.jump_instruction(1, offset),
+            OpCode::Loop => offset + self.jump_instruction(-1, offset),
         }
     }
 
@@ -134,13 +136,18 @@ impl Chunk {
         2
     }
 
-    fn jump_instruction(&self, sign: usize, offset: usize) -> usize {
-        assert!(offset < self.codes.len()+2);
+    fn jump_instruction(&self, sign: isize, offset: usize) -> usize {
+        assert!(offset < self.codes.len() + 2);
         let op_code = OpCode::from(self.codes[offset]);
-        let bh = (self.codes[offset+1] as u16) << 8;
-        let bl = self.codes[offset+2] as u16;
-        let jump = (bh | bl) as usize;
-        println!("{:<16} {:4} -> {}", op_code, offset, offset+3+sign*jump);
+        let bh = (self.codes[offset + 1] as u16) << 8;
+        let bl = self.codes[offset + 2] as u16;
+        let jump = (bh | bl) as isize;
+        println!(
+            "{:<16} {:4} -> {}",
+            op_code,
+            offset,
+            offset as isize + 3 + sign * jump
+        );
         3
     }
 }

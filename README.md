@@ -22,11 +22,32 @@ if (x > y) {
 } else {
   print y - x;
 }
+
+if (x > 0 and y > 0) {
+  print "both positive";
+}
+
+if (x > 0 or y > 100) {
+  print "x is positive";
+}
+
+var i = 0;
+while (i < 5) {
+  i = i + 1;
+  print i;
+}
 ```
 
 ```
 Hello, world!
 7
+both positive
+x is positive
+1
+2
+3
+4
+5
 ```
 
 ## Building
@@ -41,12 +62,18 @@ cargo build --release
 # Run a file
 rlox <file>
 
+# Run the included example
+rlox test.lox
+
 # REPL
 rlox
 
 # Flags
 -d, --debug      Print bytecode disassembly before execution
 -t, --tracing    Trace stack and instruction at runtime
+
+# Run the example with disassembly
+rlox --debug test.lox
 ```
 
 ## Implementation status
@@ -61,13 +88,14 @@ rlox
 - String concatenation and interning
 - Global and local variables with block scoping
 - `if` / `else`
+- `while` loops
+- Logical `and` / `or` (short-circuit evaluation)
 - `print` statement
 - Panic-mode error recovery with synchronization
 
 **In progress**
 
-- `while` and `for` loops
-- Logical `and` / `or` (short-circuit evaluation)
+- `for` loops
 - Functions and closures
 - Classes and inheritance
 - Mark-and-sweep garbage collection (linked list infrastructure is in place)
