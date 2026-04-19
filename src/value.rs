@@ -1,7 +1,7 @@
 use std::cmp::{PartialEq, PartialOrd};
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Value {
     Number(f64),
     Boolean(bool),
@@ -15,13 +15,13 @@ pub struct Obj {
     pub marked: bool,
 }
 
-  impl Obj {
-      pub fn as_string(&self) -> Option<&str> {
-          match &self.kind {
-              ObjKind::String(s) => Some(s.as_str()),
-          }
-      }
-  }
+impl Obj {
+    pub fn as_string(&self) -> Option<&str> {
+        match &self.kind {
+            ObjKind::String(s) => Some(s.as_str()),
+        }
+    }
+}
 
 pub enum ObjKind {
     String(String),
@@ -29,10 +29,12 @@ pub enum ObjKind {
 
 impl Value {
     pub unsafe fn as_string(&self) -> Option<&str> {
-        unsafe { match self {
-            Value::Obj(ptr) => (*(*ptr)).as_string(),
-            _ => None,
-        } }
+        unsafe {
+            match self {
+                Value::Obj(ptr) => (*(*ptr)).as_string(),
+                _ => None,
+            }
+        }
     }
 }
 impl std::fmt::Display for Value {

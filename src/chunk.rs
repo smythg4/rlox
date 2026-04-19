@@ -8,8 +8,11 @@ pub enum OpCode {
     True,
     False,
     Pop,
+    GetLocal,
+    SetLocal,
     GetGlobal,
     DefineGlobal,
+    SetGlobal,
     Equal,
     Greater,
     Less,
@@ -20,6 +23,8 @@ pub enum OpCode {
     Not,
     Negate,
     Print,
+    Jump,
+    JumpIfFalse,
     Return,
 }
 
@@ -72,6 +77,9 @@ impl Chunk {
         }
         let op_code = OpCode::from(self.codes[offset]);
         match op_code {
+            OpCode::Constant | OpCode::DefineGlobal | OpCode::GetGlobal | OpCode::SetGlobal => {
+                offset + self.constant_instruction(offset)
+            }
             OpCode::Return
             | OpCode::False
             | OpCode::True
@@ -81,11 +89,14 @@ impl Chunk {
             | OpCode::Greater
             | OpCode::Less
             | OpCode::Print
-            | OpCode::Pop => offset + self.simple_instruction(offset),
-            OpCode::Constant | OpCode::DefineGlobal | OpCode::GetGlobal => offset + self.constant_instruction(offset),
-            OpCode::Negate | OpCode::Divide | OpCode::Multiply | OpCode::Subtract | OpCode::Add => {
-                offset + self.simple_instruction(offset)
-            }
+            | OpCode::Pop
+            | OpCode::Negate
+            | OpCode::Divide
+            | OpCode::Multiply
+            | OpCode::Subtract
+            | OpCode::Add => offset + self.simple_instruction(offset),
+            OpCode::GetLocal | OpCode::SetLocal => offset + self.byte_instruction(offset),
+            OpCode::Jump | OpCode::JumpIfFalse => offset + self.jump_instruction(1, offset),
         }
     }
 
@@ -114,5 +125,22 @@ impl Chunk {
         let i = self.constants.len() as u8;
         self.constants.push(constant);
         i
+    }
+
+    fn byte_instruction(&self, offset: usize) -> usize {
+        let op_code = OpCode::from(self.codes[offset]);
+        let slot = self.codes[offset + 1] as usize;
+        println!("{:<16} {}", op_code, slot);
+        2
+    }
+
+    fn jump_instruction(&self, sign: usize, offset: usize) -> usize {
+        assert!(offset < self.codes.len()+2);
+        let op_code = OpCode::from(self.codes[offset]);
+        let bh = (self.codes[offset+1] as u16) << 8;
+        let bl = self.codes[offset+2] as u16;
+        let jump = (bh | bl) as usize;
+        println!("{:<16} {:4} -> {}", op_code, offset, offset+3+sign*jump);
+        3
     }
 }

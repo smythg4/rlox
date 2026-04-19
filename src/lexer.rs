@@ -156,9 +156,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn expect_match(&mut self, expected: char) -> bool {
-        if self.current >= self.source.len() {
-            return false;
-        } else if self.peek() != expected {
+        if self.current >= self.source.len() || self.peek() != expected {
             return false;
         }
         self.current += 1;

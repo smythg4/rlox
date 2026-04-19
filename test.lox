@@ -1,20 +1,16 @@
-var x = 25;
-class Bagel {
-	eat() {
-		print "nom nom nom";
-	}
-}
-%
-var b = Bagel();
+var x = 5;
+var y = 10;
 
-for var i = 0; i < 10; i = i + 1 {
-	b.eat();
-}
+print "x: ";
+print x;
+print "y: ";
+print y;
 
-while true {
-	if !false {
-		print nil;
-	}
+if (x<y) {
+	print "x is less than y";
+} else {
+print "y is less than x";
 }
-
-var y = 6 * 12 + "name" / 1.2;
+if (y>x) {
+	print "y is greater than x";
+}

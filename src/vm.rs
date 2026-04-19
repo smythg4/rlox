@@ -80,9 +80,18 @@ impl Vm {
         b
     }
 
+    fn read_short(&mut self) -> u16 {
+        assert!(self.ip < self.chunk.codes.len()-1, "can't read two bytes when ip is so high");
+        let bh = self.chunk.codes[self.ip] as u16;
+        let bl = self.chunk.codes[self.ip+1] as u16;
+        let val = bh << 8 | bl;
+        self.ip += 2;
+        val
+    }
+
     fn read_constant(&mut self) -> Value {
         let offset = self.read_byte() as usize;
-        self.chunk.constants.get(offset).unwrap().clone()
+        self.chunk.constants[offset]
     }
 
     pub fn run(&mut self) -> InterpretResult {
@@ -90,10 +99,21 @@ impl Vm {
             if self.toggle_tracing {
                 print!("      ");
                 self.stack.iter().for_each(|val| print!("[{val}]"));
-                print!("\n");
+                println!();
                 self.chunk.disassemble_instruction(self.ip);
             }
             match OpCode::from(self.read_byte()) {
+                OpCode::Jump => {
+                    // unconditional jump
+                    let offset = self.read_short() as usize;
+                    self.ip += offset;
+                },
+                OpCode::JumpIfFalse => {
+                    let offset = self.read_short() as usize;
+                    if self.is_falsey(*self.peek_stack(0)) {
+                        self.ip += offset;
+                    }
+                },
                 OpCode::Return => {
                     // let popped = self.stack.pop().unwrap();
                     // println!("{popped}");
@@ -108,39 +128,59 @@ impl Vm {
                 OpCode::False => self.stack.push(Value::Boolean(false)),
                 OpCode::Pop => {
                     let _ = self.stack.pop();
-                },
+                }
+                OpCode::GetLocal => {
+                    let slot = self.read_byte() as usize;
+                    self.stack.push(self.stack[slot]);
+                }
                 OpCode::DefineGlobal => {
                     // read the string `ObjString* name = READ_STRING();`
                     let name = self.read_constant();
-                    let value = self.peek_stack(0).clone();
+                    let value = self.peek_stack(0);
                     //set the global table `tableSet(&vm.globals, name, peek(0));`
                     let key = unsafe { name.as_string() }.unwrap().to_string();
-                    self.globals.insert(key, value);
+                    self.globals.insert(key, *value);
                     let _ = self.stack.pop(); // pop the stack
-                },
-                OpCode::GetGlobal => {
+                }
+                OpCode::SetGlobal => {
                     let name = self.read_constant();
+
                     let key = unsafe { name.as_string() }.unwrap();
-                    if let Some(val) = self.globals.get(key) {
-                        self.stack.push(val.clone());
+                    if self.globals.contains_key(key) {
+                        let value = self.peek_stack(0);
+                        self.globals.insert(key.to_string(), *value);
                     } else {
                         self.runtime_error(&format!("Undefined variable '{}'", name));
                         return InterpretResult::RuntimeError;
                     }
-                },
+                }
+                OpCode::SetLocal => {
+                    let slot = self.read_byte() as usize;
+                    self.stack[slot] = *self.peek_stack(0);
+                }
+                OpCode::GetGlobal => {
+                    let name = self.read_constant();
+                    let key = unsafe { name.as_string() }.unwrap();
+                    if let Some(val) = self.globals.get(key) {
+                        self.stack.push(*val);
+                    } else {
+                        self.runtime_error(&format!("Undefined variable '{}'", name));
+                        return InterpretResult::RuntimeError;
+                    }
+                }
                 OpCode::Equal => {
-                    let x = self.stack.pop().unwrap();
                     let y = self.stack.pop().unwrap();
+                    let x = self.stack.pop().unwrap();
                     self.stack.push(Value::Boolean(x == y));
                 }
                 OpCode::Greater => {
-                    let x = self.stack.pop().unwrap();
                     let y = self.stack.pop().unwrap();
+                    let x = self.stack.pop().unwrap();
                     self.stack.push(Value::Boolean(x > y));
                 }
                 OpCode::Less => {
-                    let x = self.stack.pop().unwrap();
                     let y = self.stack.pop().unwrap();
+                    let x = self.stack.pop().unwrap();
                     self.stack.push(Value::Boolean(x < y));
                 }
                 OpCode::Negate => {
@@ -161,8 +201,8 @@ impl Vm {
                         (Value::Obj(_), Value::Obj(_))
                     );
                     if both_numbers {
-                        let x = self.stack.pop().unwrap();
                         let y = self.stack.pop().unwrap();
+                        let x = self.stack.pop().unwrap();
                         self.stack.push(x + y);
                     } else if both_objects {
                         if !self.concatenate() {
@@ -180,8 +220,8 @@ impl Vm {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
-                    let x = self.stack.pop().unwrap();
                     let y = self.stack.pop().unwrap();
+                    let x = self.stack.pop().unwrap();
                     self.stack.push(x - y);
                 }
                 OpCode::Multiply => {
@@ -190,8 +230,8 @@ impl Vm {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
-                    let x = self.stack.pop().unwrap();
                     let y = self.stack.pop().unwrap();
+                    let x = self.stack.pop().unwrap();
                     self.stack.push(x * y);
                 }
                 OpCode::Divide => {
@@ -200,8 +240,8 @@ impl Vm {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
-                    let x = self.stack.pop().unwrap();
                     let y = self.stack.pop().unwrap();
+                    let x = self.stack.pop().unwrap();
                     self.stack.push(x / y);
                 }
                 OpCode::Not => {
