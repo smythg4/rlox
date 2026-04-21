@@ -26,6 +26,7 @@ pub enum OpCode {
     Jump,
     JumpIfFalse,
     Loop,
+    Call,
     Return,
 }
 
@@ -96,7 +97,9 @@ impl Chunk {
             | OpCode::Multiply
             | OpCode::Subtract
             | OpCode::Add => offset + self.simple_instruction(offset),
-            OpCode::GetLocal | OpCode::SetLocal => offset + self.byte_instruction(offset),
+            OpCode::GetLocal | OpCode::SetLocal | OpCode::Call => {
+                offset + self.byte_instruction(offset)
+            }
             OpCode::Jump | OpCode::JumpIfFalse => offset + self.jump_instruction(1, offset),
             OpCode::Loop => offset + self.jump_instruction(-1, offset),
         }

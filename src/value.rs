@@ -1,3 +1,4 @@
+use crate::chunk::Chunk;
 use std::cmp::{PartialEq, PartialOrd};
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
@@ -19,12 +20,18 @@ impl Obj {
     pub fn as_string(&self) -> Option<&str> {
         match &self.kind {
             ObjKind::String(s) => Some(s.as_str()),
+            _ => None,
         }
     }
 }
 
 pub enum ObjKind {
     String(String),
+    Function {
+        arity: usize,
+        name: String,
+        chunk: Chunk,
+    },
 }
 
 impl Value {
@@ -46,6 +53,8 @@ impl std::fmt::Display for Value {
                 let obj = unsafe { &**ptr };
                 match &obj.kind {
                     ObjKind::String(s) => write!(f, "{s}"),
+                    ObjKind::Function { name, .. } if name.is_empty() => write!(f, "<script>"),
+                    ObjKind::Function { name, .. } => write!(f, "<fn {name}>"),
                 }
             }
             Value::Nil => write!(f, "nil"),

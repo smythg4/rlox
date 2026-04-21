@@ -7,29 +7,23 @@ Lox is a dynamically typed scripting language. clox is its bytecode-compiled imp
 ## Example
 
 ```lox
-var name = "world";
-
-{
-  var greeting = "Hello, " + name + "!";
-  print greeting;
+fun factorial(n) {
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
 }
 
-var x = 10;
-var y = 3;
-
-if (x > y) {
-  print x - y;
-} else {
-  print y - x;
+fun first_over(limit) {
+  var n = 0;
+  while (true) {
+    n = n + 1;
+    if (n * n > limit) return n;
+  }
 }
 
-if (x > 0 and y > 0) {
-  print "both positive";
-}
-
-if (x > 0 or y > 100) {
-  print "x is positive";
-}
+print factorial(5);
+print factorial(10);
+print first_over(20);
+print first_over(100);
 
 var w = 0;
 while (w < 6) {
@@ -42,10 +36,10 @@ while (w < 6) {
 ```
 
 ```
-Hello, world!
-7
-both positive
-x is positive
+120
+3628800
+5
+11
 10
 11
 12
@@ -97,7 +91,7 @@ rlox --debug test.lox
 **Implemented**
 
 - Single-pass bytecode compiler with Pratt parser
-- Stack-based VM
+- Stack-based VM with call frames
 - Types: `f64` numbers, booleans, nil, strings
 - Arithmetic: `+` `-` `*` `/` and unary `-`
 - Comparison: `<` `>` `<=` `>=` `==` `!=`
@@ -107,10 +101,13 @@ rlox --debug test.lox
 - `while` and `for` loops
 - Logical `and` / `or` (short-circuit evaluation)
 - `print` statement
+- Functions with parameters and return values
+- Recursion
+- Stack traces on runtime errors
 - Panic-mode error recovery with synchronization
 
 **In progress**
 
-- Functions and closures
+- Closures
 - Classes and inheritance
 - Mark-and-sweep garbage collection (linked list infrastructure is in place)

@@ -1,3 +1,4 @@
+// --- strings and globals ---
 var name = "world";
 
 {
@@ -5,6 +6,7 @@ var name = "world";
   print greeting;
 }
 
+// --- arithmetic and comparison ---
 var x = 10;
 var y = 3;
 
@@ -14,36 +16,33 @@ if (x > y) {
   print y - x;
 }
 
-// and: both must be true
+// --- logical operators ---
 if (x > 0 and y > 0) {
   print "both positive";
 }
 
-// and: short-circuits on false left
 if (x < 0 and y > 0) {
   print "unreachable";
 } else {
   print "x is not positive";
 }
 
-// or: short-circuits on true left
 if (x > 0 or y > 100) {
   print "x is positive";
 }
 
-// or: falls through to right when left is false
 if (x < 0 or y > 0) {
   print "y is positive";
 }
 
-// while loop
+// --- while loop ---
 var i = 0;
 while (i < 5) {
   i = i + 1;
   print i;
 }
 
-// for loop with and condition, nested in while
+// --- for loop nested in while ---
 var w = 0;
 while (w < 6) {
   for (var f = 10; f < 14 and w < 3; f = f + 1) {
@@ -52,3 +51,62 @@ while (w < 6) {
   w = w + 1;
   print w;
 }
+
+// --- functions: basic return values ---
+fun add(a, b) {
+  return a + b;
+}
+
+fun multiply(a, b) {
+  return a * b;
+}
+
+print add(3, 4);
+print multiply(6, 7);
+
+// --- functions: recursion ---
+fun factorial(n) {
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
+}
+
+print factorial(5);
+print factorial(10);
+
+// --- functions: multiple parameters, nested calls ---
+fun max(a, b) {
+  if (a > b) return a;
+  return b;
+}
+
+print max(add(1, 2), multiply(2, 3));
+
+// --- functions: closures over globals ---
+var count = 0;
+fun increment() {
+  count = count + 1;
+  return count;
+}
+
+print increment();
+print increment();
+print increment();
+
+// --- functions: string return values ---
+fun greet(n) {
+  return "Hello, " + n + "!";
+}
+
+print greet("Lox");
+
+// --- functions: early return in loop ---
+fun first_over(limit) {
+  var n = 0;
+  while (true) {
+    n = n + 1;
+    if (n * n > limit) return n;
+  }
+}
+
+print first_over(20);
+print first_over(100);

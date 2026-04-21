@@ -3,9 +3,20 @@ use std::collections::HashMap;
 use crate::chunk::{Chunk, OpCode};
 use crate::lexer::{Lexer, Token, TokenKind};
 use crate::value::{Obj, ObjKind, Value};
-use crate::vm::InterpretResult;
 
 use anyhow::{Result, bail};
+
+struct CompilerContext {
+    function: *mut Obj,          // ObjKind::Function with its own chunk
+    function_kind: FunctionKind, // top-level or user-defined function
+    locals: Vec<Local>,
+    scope_depth: usize,
+}
+
+enum FunctionKind {
+    Script, // top-level execution
+    Function,
+}
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,26 +55,26 @@ impl From<TokenKind> for Precedence {
             | TokenKind::LessEqual => Precedence::Comparison,
             TokenKind::And => Precedence::And,
             TokenKind::Or => Precedence::Or,
+            TokenKind::LeftParen => Precedence::Call,
             _ => Precedence::None,
         }
     }
 }
 
-struct Local(Token, Option<usize>); // name and depth -- `None` means uninitialized
+struct Local {
+    name: Token,          // name
+    depth: Option<usize>, // `None` means uninitialized
+}
 
 pub struct Compiler<'a> {
     lexer: Lexer<'a>,
     current: Token,
     previous: Token,
 
-    compiling_chunk: &'a mut Chunk,
+    contexts: Vec<CompilerContext>,
 
     objects: &'a mut *mut Obj,
     strings: &'a mut HashMap<String, *mut Obj>,
-
-    locals: Vec<Local>,
-    local_count: usize,
-    scope_depth: usize,
 
     had_error: bool,
     panic_mode: bool,
@@ -76,39 +87,89 @@ impl<'a> Compiler<'a> {
         self
     }
 
-    pub fn from(
+    pub fn new(
         lexer: Lexer<'a>,
-        chunk: &'a mut Chunk,
         objects: &'a mut *mut Obj,
         strings: &'a mut HashMap<String, *mut Obj>,
     ) -> Self {
-        Compiler {
+        let mut c = Compiler {
             lexer,
             current: Token {
                 kind: TokenKind::Nil,
-                lexeme: "".into(),
+                lexeme: String::new(),
                 line: 0,
             },
             previous: Token {
                 kind: TokenKind::Nil,
-                lexeme: "".into(),
+                lexeme: String::new(),
                 line: 0,
             },
-            compiling_chunk: chunk,
+            contexts: Vec::new(),
             objects,
             strings,
-
-            locals: Vec::new(),
-            local_count: 0,
-            scope_depth: 0,
 
             had_error: false,
             panic_mode: false,
             debug_print: false,
-        }
+        };
+        c.push_context(FunctionKind::Script);
+        c
     }
 
-    pub fn compile(&mut self) -> Result<InterpretResult> {
+    fn current_function(&self) -> &ObjKind {
+        let context = self.contexts.last().unwrap();
+        unsafe { &(*context.function).kind }
+    }
+
+    fn current_function_mut(&mut self) -> &mut ObjKind {
+        let context = self.contexts.last().unwrap();
+        unsafe { &mut (*context.function).kind }
+    }
+
+    fn current_chunk(&self) -> &Chunk {
+        let context = self.contexts.last().unwrap();
+        let object = unsafe { &(*context.function).kind };
+        let ObjKind::Function { chunk, .. } = object else {
+            unreachable!()
+        };
+        chunk
+    }
+
+    fn current_chunk_mut(&mut self) -> &mut Chunk {
+        let context = self.contexts.last_mut().unwrap();
+        let object = unsafe { &mut (*context.function).kind };
+        let ObjKind::Function { chunk, .. } = object else {
+            unreachable!()
+        };
+        chunk
+    }
+
+    fn current_locals(&self) -> &[Local] {
+        let context = self.contexts.last().unwrap();
+        &context.locals
+    }
+
+    fn current_locals_mut(&mut self) -> &mut Vec<Local> {
+        let context = self.contexts.last_mut().unwrap();
+        &mut context.locals
+    }
+
+    fn current_local_count(&self) -> usize {
+        let context = self.contexts.last().unwrap();
+        context.locals.len()
+    }
+
+    fn current_scope_depth(&self) -> usize {
+        let context = self.contexts.last().unwrap();
+        context.scope_depth
+    }
+
+    fn current_scope_depth_mut(&mut self) -> &mut usize {
+        let context = self.contexts.last_mut().unwrap();
+        &mut context.scope_depth
+    }
+
+    pub fn compile(&mut self) -> Result<*mut Obj> {
         self.advance();
 
         while !self.peek_match(TokenKind::Eof) {
@@ -116,11 +177,10 @@ impl<'a> Compiler<'a> {
         }
 
         self.consume(TokenKind::Eof, "Expect end of expression");
-        self.end_compiler();
         if self.had_error {
             bail!("compiler error");
         }
-        Ok(InterpretResult::Ok)
+        Ok(self.end_compiler())
     }
 
     fn advance(&mut self) {
@@ -180,7 +240,8 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_byte(&mut self, byte: u8) {
-        self.compiling_chunk.write_chunk(byte, self.previous.line);
+        let prev_line = self.previous.line;
+        self.current_chunk_mut().write_chunk(byte, prev_line);
     }
 
     fn emit_bytes(&mut self, byte1: u8, byte2: u8) {
@@ -193,23 +254,23 @@ impl<'a> Compiler<'a> {
         self.emit_bytes(0xff, 0xff);
         // Nystrom had this twice: `self.emit_byte(0xff);`, I'm trying the emit_bytes instead.
         // return the index of where these dummy bytes were stored for later
-        self.compiling_chunk.codes.len() - 2
+        self.current_chunk().codes.len() - 2
     }
 
     fn patch_jump(&mut self, offset: usize) {
         // -2 to adjust for the bytecode for the jump offset itself
-        let jump = self.compiling_chunk.codes.len() - offset - 2;
+        let jump = self.current_chunk().codes.len() - offset - 2;
         if jump > u16::MAX as usize {
             self.error("Too much code to jump over.".to_string());
         }
-        self.compiling_chunk.codes[offset] = (jump >> 8) as u8;
-        self.compiling_chunk.codes[offset + 1] = jump as u8;
+        self.current_chunk_mut().codes[offset] = (jump >> 8) as u8;
+        self.current_chunk_mut().codes[offset + 1] = jump as u8;
     }
 
     fn emit_loop(&mut self, loop_start: usize) {
         self.emit_byte(OpCode::Loop as u8);
 
-        let offset = self.compiling_chunk.codes.len() - loop_start + 2;
+        let offset = self.current_chunk().codes.len() - loop_start + 2;
         if offset > u16::MAX as usize {
             self.error("Loop body too large".into());
         }
@@ -219,11 +280,21 @@ impl<'a> Compiler<'a> {
         self.emit_bytes(bh, bl);
     }
 
-    fn end_compiler(&mut self) {
-        if !self.had_error && self.debug_print {
-            self.compiling_chunk.disassemble_chunk("code");
-        }
+    fn end_compiler(&mut self) -> *mut Obj {
         self.emit_return();
+        let context = self.contexts.pop().unwrap();
+        let object = unsafe { &(*context.function).kind };
+        let ObjKind::Function { chunk, .. } = object else {
+            panic!("Attempt to return a non-function object from compiler")
+        };
+        if !self.had_error && self.debug_print {
+            let name = match object {
+                ObjKind::Function { name, .. } if !name.is_empty() => name.as_ref(),
+                _ => "<script>",
+            };
+            chunk.disassemble_chunk(name);
+        }
+        context.function
     }
 
     fn expression(&mut self) {
@@ -257,7 +328,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn while_statement(&mut self) {
-        let loop_start = self.compiling_chunk.codes.len();
+        let loop_start = self.current_chunk().codes.len();
         self.consume(TokenKind::LeftParen, "Expect a '(' after 'while'.");
         self.expression();
         self.consume(TokenKind::RightParen, "Expect a ')' after condition.");
@@ -284,7 +355,7 @@ impl<'a> Compiler<'a> {
             self.expression_statement();
         }
         // mark the top of the loop, right at the condition clause (initializer is one time and done)
-        let mut loop_start = self.compiling_chunk.codes.len();
+        let mut loop_start = self.current_chunk().codes.len();
 
         let mut exit_jump = None;
         // compile the condition expression
@@ -305,7 +376,7 @@ impl<'a> Compiler<'a> {
             // no increment
         } else {
             let body_jump = self.emit_jump(OpCode::Jump);
-            let increment_start = self.compiling_chunk.codes.len();
+            let increment_start = self.current_chunk().codes.len();
             self.expression();
             self.emit_byte(OpCode::Pop as u8); // discards the value of the increment
             self.consume(TokenKind::RightParen, "Expect a ')' after for clauses");
@@ -330,6 +401,8 @@ impl<'a> Compiler<'a> {
     fn declaration(&mut self) {
         if self.peek_match(TokenKind::Var) {
             self.var_declaration();
+        } else if self.peek_match(TokenKind::Fun) {
+            self.fun_declaration();
         } else {
             self.statement();
         }
@@ -353,6 +426,14 @@ impl<'a> Compiler<'a> {
             "Expect ';' after variable declaration",
         );
 
+        self.define_variable(global);
+    }
+
+    fn fun_declaration(&mut self) {
+        let global = self.parse_variable("Expect function name.");
+
+        self.mark_initialized();
+        self.function(FunctionKind::Function);
         self.define_variable(global);
     }
 
@@ -380,6 +461,10 @@ impl<'a> Compiler<'a> {
                 self.block();
                 self.end_scope();
             }
+            TokenKind::Return => {
+                self.advance();
+                self.return_statement();
+            }
             _ => {
                 self.expression_statement();
             }
@@ -388,35 +473,121 @@ impl<'a> Compiler<'a> {
 
     fn block(&mut self) {
         while self.current.kind != TokenKind::RightBrace && self.current.kind != TokenKind::Eof {
-            // '\0' is EOF
-            // Nystrom uses `check(TOKEN_RIGHT_BRACE) && check(TOKEN_EOF)`
             self.declaration();
         }
         self.consume(TokenKind::RightBrace, "Expect a '}' after a block.");
     }
 
+    /// Initializes a new compiler context for a function or the top-level script.
+    ///
+    /// Each context owns its `ObjFunction` (with a fresh `Chunk`) and an independent
+    /// locals stack. Slot 0 is reserved via a dummy local — the VM places the function
+    /// object there at call time, so user-declared locals start at slot 1.
+    ///
+    /// Mirrors Nystrom's `initCompiler`. Paired with `end_compiler`, which pops the
+    /// context and returns the finished `ObjFunction`.
+    fn push_context(&mut self, kind: FunctionKind) {
+        let name = match kind {
+            FunctionKind::Script => String::new(),
+            FunctionKind::Function => self.previous.lexeme.clone(),
+        };
+        let func_obj = Box::into_raw(Box::new(Obj {
+            kind: ObjKind::Function {
+                arity: 0,
+                name,
+                chunk: Chunk::default(),
+            },
+            next: *self.objects,
+            marked: false,
+        }));
+        *self.objects = func_obj;
+        let dummy = Local {
+            name: Token {
+                kind: TokenKind::Nil,
+                lexeme: String::new(),
+                line: 0,
+            },
+            depth: Some(0),
+        };
+        self.contexts.push(CompilerContext {
+            function: func_obj,
+            function_kind: kind,
+            locals: vec![dummy],
+            scope_depth: 0,
+        });
+    }
+
+    fn function(&mut self, kind: FunctionKind) {
+        self.push_context(kind);
+        self.begin_scope();
+
+        self.consume(TokenKind::LeftParen, "Expect '(' after function name.");
+
+        // parse the parameters
+        if self.current.kind != TokenKind::RightParen {
+            loop {
+                let ObjKind::Function { arity, .. } = self.current_function_mut() else {
+                    unreachable!()
+                };
+                *arity += 1;
+                if *arity > u8::MAX as usize {
+                    self.error_at_current("can't have more than 255 parameters.".to_string());
+                }
+                let constant = self.parse_variable("expect parameter name.");
+                self.define_variable(constant);
+                if !self.peek_match(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RightParen, "Expect ')' after parameters.");
+        self.consume(TokenKind::LeftBrace, "Expext '{{' before function body.");
+
+        // parse the body
+        self.block();
+
+        let function = self.end_compiler();
+        let constant = self.make_constant(Value::Obj(function));
+        self.emit_bytes(OpCode::Constant as u8, constant);
+    }
+
     fn begin_scope(&mut self) {
-        self.scope_depth += 1;
+        *self.current_scope_depth_mut() += 1;
     }
 
     fn end_scope(&mut self) {
-        self.scope_depth -= 1;
+        // couldn't use the helpers here due to borrow conflicts
+        self.contexts.last_mut().unwrap().scope_depth -= 1;
 
-        // put locals to rest when a scope exists
-        while self.local_count > 0
-            && let Some(depth) = self.locals[self.local_count - 1].1
-            && depth > self.scope_depth
-        {
+        loop {
+            let ctx = self.contexts.last_mut().unwrap();
+            let should_pop = !ctx.locals.is_empty()
+                && ctx.locals[ctx.locals.len() - 1]
+                    .depth
+                    .is_some_and(|d| d > ctx.scope_depth);
+            if !should_pop {
+                break;
+            }
+            // borrow dropped here
             self.emit_byte(OpCode::Pop as u8);
-            self.local_count -= 1;
+            let _ = self.contexts.last_mut().unwrap().locals.pop();
         }
-        self.locals.truncate(self.local_count);
     }
 
     fn print_statement(&mut self) {
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after value.");
         self.emit_byte(OpCode::Print as u8);
+    }
+
+    fn return_statement(&mut self) {
+        if self.peek_match(TokenKind::Semicolon) {
+            self.emit_return();
+        } else {
+            self.expression();
+            self.consume(TokenKind::Semicolon, "Expect ';' after a return value");
+            self.emit_byte(OpCode::Return as u8);
+        }
     }
 
     fn synchronize(&mut self) {
@@ -444,6 +615,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_return(&mut self) {
+        self.emit_byte(OpCode::Nil as u8);
         self.emit_byte(OpCode::Return as u8);
     }
 
@@ -460,22 +632,24 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn string(&mut self) {
-        let stripped = self.previous.lexeme.trim_matches('"');
-        if let Some(&ptr) = self.strings.get(stripped) {
-            self.emit_constant(Value::Obj(ptr));
-            return;
+    fn intern_string(&mut self, s: String) -> *mut Obj {
+        if let Some(&ptr) = self.strings.get(&s) {
+            return ptr;
         }
         let new_obj = Box::new(Obj {
-            kind: ObjKind::String(stripped.to_string()),
+            kind: ObjKind::String(s.clone()),
             next: *self.objects,
             marked: false,
         });
-
         let ptr = Box::into_raw(new_obj);
+        self.strings.insert(s, ptr);
+        *self.objects = ptr;
+        ptr
+    }
 
-        self.strings.insert(stripped.to_string(), ptr); // intern the string
-        *self.objects = ptr; // update the GC linked list
+    fn string(&mut self) {
+        let stripped = self.previous.lexeme.trim_matches('"').to_string();
+        let ptr = self.intern_string(stripped);
         self.emit_constant(Value::Obj(ptr)); // emit the opcode
     }
 
@@ -545,6 +719,29 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    fn call(&mut self) {
+        let arg_count = self.argument_list();
+        self.emit_bytes(OpCode::Call as u8, arg_count);
+    }
+
+    fn argument_list(&mut self) -> u8 {
+        let mut count = 0;
+        if self.current.kind != TokenKind::RightParen {
+            loop {
+                self.expression();
+                if count == u8::MAX {
+                    self.error("can't have more than 255 arguments.".into());
+                }
+                count += 1;
+                if !self.peek_match(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RightParen, "Expect a ')' after arguments.");
+        count
+    }
+
     fn call_prefix(&mut self, kind: TokenKind, can_assign: bool) {
         match kind {
             TokenKind::LeftParen => self.grouping(),
@@ -571,6 +768,7 @@ impl<'a> Compiler<'a> {
             | TokenKind::LessEqual => self.binary(),
             TokenKind::And => self._and(),
             TokenKind::Or => self.or_(),
+            TokenKind::LeftParen => self.call(),
             _ => {}
         }
     }
@@ -594,7 +792,7 @@ impl<'a> Compiler<'a> {
         self.consume(TokenKind::Identifier, msg);
 
         self.declare_variable(); // `declareVariable()` in Nystrom
-        if self.scope_depth > 0 {
+        if self.current_scope_depth() > 0 {
             return 0;
         }
 
@@ -602,12 +800,17 @@ impl<'a> Compiler<'a> {
     }
 
     fn mark_initialized(&mut self) {
-        self.locals[self.local_count - 1].1 = Some(self.scope_depth);
+        let count = self.current_local_count();
+        let depth = self.current_scope_depth();
+        if depth == 0 {
+            return;
+        }
+        self.current_locals_mut()[count - 1].depth = Some(depth);
     }
 
     fn define_variable(&mut self, global: u8) {
         // determine if it's local or global (global = 0)
-        if self.scope_depth > 0 {
+        if self.current_scope_depth() > 0 {
             self.mark_initialized();
             return;
         }
@@ -635,36 +838,27 @@ impl<'a> Compiler<'a> {
     }
 
     fn identifier_constant(&mut self, token: Token) -> u8 {
-        if let Some(&ptr) = self.strings.get(&token.lexeme) {
-            return self.make_constant(Value::Obj(ptr));
-        }
-        let new_obj = Box::new(Obj {
-            kind: ObjKind::String(token.lexeme.clone()),
-            next: *self.objects,
-            marked: false,
-        });
-        let ptr = Box::into_raw(new_obj);
-        self.strings.insert(token.lexeme, ptr);
-        *self.objects = ptr;
+        let s = token.lexeme.to_string();
+        let ptr = self.intern_string(s);
         self.make_constant(Value::Obj(ptr))
     }
 
     fn declare_variable(&mut self) {
-        if self.scope_depth == 0 {
+        if self.current_scope_depth() == 0 {
             return;
         }
 
         let name = self.previous.clone();
         // check to make sure we're not redeclaring in the same scope
-        for i in (0..self.local_count).rev() {
-            let local = &self.locals[i];
-            if let Some(depth) = local.1
-                && depth < self.scope_depth
+        for i in (0..self.current_local_count()).rev() {
+            let local = &self.current_locals()[i];
+            if let Some(depth) = local.depth
+                && depth < self.current_scope_depth()
             {
                 break;
             }
 
-            if Self::identifiers_equal(&name, &local.0) {
+            if Self::identifiers_equal(&name, &local.name) {
                 self.error("Already a variable with this name in this scope.".into());
             }
         }
@@ -676,10 +870,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve_local(&mut self, name: &Token) -> Option<u8> {
-        for i in (0..self.local_count).rev() {
-            let local = &self.locals[i];
-            if Self::identifiers_equal(name, &local.0) {
-                if local.1.is_none() {
+        for i in (0..self.current_local_count()).rev() {
+            let local = &self.current_locals()[i];
+            if Self::identifiers_equal(name, &local.name) {
+                if local.depth.is_none() {
                     self.error("Can't read local variable in its own initializer.".into());
                 }
                 return Some(i as u8);
@@ -689,12 +883,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_local(&mut self, local_token: Token) {
-        if self.local_count >= u8::MAX as usize {
+        if self.current_local_count() >= u8::MAX as usize {
             self.error("Too many local variables in function".into());
             return;
         }
-        self.locals.push(Local(local_token, None));
-        self.local_count += 1;
+        self.current_locals_mut().push(Local {
+            name: local_token,
+            depth: None,
+        });
     }
 
     fn emit_constant(&mut self, value: Value) {
@@ -703,8 +899,8 @@ impl<'a> Compiler<'a> {
     }
 
     fn make_constant(&mut self, value: Value) -> u8 {
-        let const_i = self.compiling_chunk.add_constant(value);
-        if self.compiling_chunk.constants.len() > u8::MAX as usize {
+        let const_i = self.current_chunk_mut().add_constant(value);
+        if self.current_chunk().constants.len() > u8::MAX as usize {
             self.error("too many constants for one chunk".into());
             return 0;
         }
