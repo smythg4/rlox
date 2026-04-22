@@ -51,11 +51,7 @@ pub fn repl(vm: &mut Vm) -> Result<()> {
         if n == 0 {
             break;
         }
-        match vm.interpret(&buf[0..n]) {
-            InterpretResult::CompileError => std::process::exit(65),
-            InterpretResult::RuntimeError => std::process::exit(70),
-            InterpretResult::Ok => {}
-        }
+        vm.interpret(&buf[0..n]);
         write!(stdout, "> ")?;
         stdout.flush()?;
         buf.clear();

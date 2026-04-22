@@ -2,12 +2,15 @@ use crate::chunk::Chunk;
 use std::cmp::{PartialEq, PartialOrd};
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
+use anyhow::Result;
+
 #[derive(Debug, Clone, Copy)]
 pub enum Value {
     Number(f64),
     Boolean(bool),
     Obj(*mut Obj),
     Nil,
+    NativeFunction(fn(&[Value]) -> Result<Value>),
 }
 
 pub struct Obj {
@@ -32,6 +35,9 @@ pub enum ObjKind {
         name: String,
         chunk: Chunk,
     },
+    Closure {
+        function: *mut Obj,
+    }
 }
 
 impl Value {
@@ -55,9 +61,14 @@ impl std::fmt::Display for Value {
                     ObjKind::String(s) => write!(f, "{s}"),
                     ObjKind::Function { name, .. } if name.is_empty() => write!(f, "<script>"),
                     ObjKind::Function { name, .. } => write!(f, "<fn {name}>"),
+                    ObjKind::Closure { function: ptr } => {
+                        let ObjKind::Function { name, .. } = (unsafe { &(**ptr).kind }) else { unreachable!() };
+                        write!(f, "<closure {name}>")
+                    }
                 }
             }
             Value::Nil => write!(f, "nil"),
+            Value::NativeFunction(_) => write!(f, "<native fn>"),
         }
     }
 }
@@ -67,7 +78,7 @@ impl Neg for Value {
     fn neg(self) -> Self::Output {
         match self {
             Value::Number(n) => Value::Number(-n),
-            _ => panic!("can't negate a non-number"),
+            _ => unreachable!("can't negate a non-number"),
         }
     }
 }
@@ -77,7 +88,7 @@ impl Add<Value> for Value {
     fn add(self, rhs: Value) -> Self::Output {
         match (self, rhs) {
             (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
-            _ => panic!("can't add non-numbers or strings"),
+            _ => unreachable!("can't add non-numbers or strings"),
         }
     }
 }
@@ -87,7 +98,7 @@ impl Sub<Value> for Value {
     fn sub(self, rhs: Value) -> Self::Output {
         match (self, rhs) {
             (Value::Number(x), Value::Number(y)) => Value::Number(x - y),
-            _ => panic!("can't subtract non-numbers"),
+            _ => unreachable!("can't subtract non-numbers"),
         }
     }
 }
@@ -97,7 +108,7 @@ impl Mul<Value> for Value {
     fn mul(self, rhs: Value) -> Self::Output {
         match (self, rhs) {
             (Value::Number(x), Value::Number(y)) => Value::Number(x * y),
-            _ => panic!("can't multiply non-numbers"),
+            _ => unreachable!("can't multiply non-numbers"),
         }
     }
 }
@@ -107,7 +118,7 @@ impl Div<Value> for Value {
     fn div(self, rhs: Value) -> Self::Output {
         match (self, rhs) {
             (Value::Number(x), Value::Number(y)) => Value::Number(x / y),
-            _ => panic!("can't divide non-numbers"),
+            _ => unreachable!("can't divide non-numbers"),
         }
     }
 }

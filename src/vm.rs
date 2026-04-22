@@ -5,6 +5,8 @@ use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::value::{Obj, ObjKind, Value};
 
+use anyhow::{bail, Result};
+
 const FRAMES_MAX: usize = 64;
 const STACK_MAX: usize = FRAMES_MAX * u8::MAX as usize;
 
@@ -27,14 +29,27 @@ pub struct Vm {
     objects: *mut Obj,
     strings: HashMap<String, *mut Obj>,
     globals: HashMap<String, Value>,
+    // consider adding 
+    // natives: HashMap<String, Arc<dyn Fn(&[Value]) -> Result<Value>>>
+    // this would add the ability to use closures as native functions
 
     toggle_tracing: bool,
     toggle_debug_print: bool,
 }
 
+// =============================================================================
+// Lifecycle
+// =============================================================================
+
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vm {
     pub fn new() -> Self {
-        Vm {
+        let mut vm = Vm {
             stack: Vec::with_capacity(STACK_MAX),
             frames: Vec::with_capacity(FRAMES_MAX),
 
@@ -44,7 +59,24 @@ impl Vm {
 
             toggle_tracing: false,
             toggle_debug_print: false,
-        }
+        };
+
+        vm.define_native("clock", |_args| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
+            Ok(Value::Number(secs))
+        });
+        
+        vm.define_native("sqrt", |args| {
+            if args.len() != 1 {
+                bail!("'sqrt' only accepts 1 argument, got: {}", args.len());
+            }
+            let Value::Number(x) = args[0] else { bail!("'sqrt' only accepts Numbers") };
+            Ok(Value::Number(x.sqrt())) 
+        });
+        vm
     }
 
     pub fn with_tracing(mut self) -> Self {
@@ -74,50 +106,62 @@ impl Vm {
         }
     }
 
-    fn peek_stack(&self, depth: usize) -> &Value {
-        &self.stack[self.stack.len() - 1 - depth]
-    }
-
-    fn call_value(&mut self, callee: Value, arg_count: u8) -> bool {
-        if let Value::Obj(ptr) = callee
-            && matches!(unsafe { &(*ptr).kind }, ObjKind::Function { .. })
-        {
-            return self.call(ptr, arg_count);
-        }
-        self.runtime_error("Can only call functions and classes.");
-        false
-    }
-
-    fn call(&mut self, func_ptr: *mut Obj, arg_count: u8) -> bool {
-        let arity = unsafe {
-            let ObjKind::Function { arity, .. } = &(*func_ptr).kind else {
-                unreachable!()
-            };
-            *arity
-        };
-        if arg_count as usize != arity {
-            self.runtime_error(&format!(
-                "Expected {} arguments but got {}.",
-                arity, arg_count
-            ));
-            return false;
-        }
-        if self.frames.len() == FRAMES_MAX {
-            self.runtime_error("Stack overflow.");
-            return false;
-        }
-        let base_pointer = self.stack.len() - arg_count as usize - 1;
-        self.frames.push(CallFrame {
-            function: func_ptr,
-            ip: 0,
-            base_pointer,
-        });
-        true
-    }
-
     fn reset_stack(&mut self) {
         self.frames.clear();
         self.stack.clear();
+    }
+
+    fn define_native(&mut self, name: &str, native_func: fn(&[Value]) -> Result<Value>) {
+        self.globals.insert(name.to_string(), Value::NativeFunction(native_func));
+    }
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        let mut obj = self.objects;
+        while !obj.is_null() {
+            let next = unsafe { (*obj).next };
+            drop(unsafe { Box::from_raw(obj) });
+            obj = next;
+        }
+    }
+}
+
+// =============================================================================
+// Frame
+// =============================================================================
+
+impl Vm {
+
+  fn resolve_function(ptr: *mut Obj) -> *mut Obj {
+      unsafe {
+          match &(*ptr).kind {
+              ObjKind::Function { .. } => ptr,
+              ObjKind::Closure { function } => *function,
+              _ => unreachable!(),
+          }
+      }
+  }
+
+    fn current_func(&self) -> &Obj {
+        unsafe { &*Self::resolve_function(self.frames.last().unwrap().function) }
+    }
+
+  fn current_chunk(&self) -> &Chunk {
+      let ObjKind::Function { chunk, .. } = &self.current_func().kind else { unreachable!() };
+      chunk
+  }
+
+    fn current_ip(&self) -> usize {
+        self.frames.last().unwrap().ip
+    }
+
+    fn current_ip_mut(&mut self) -> &mut usize {
+        &mut self.frames.last_mut().unwrap().ip
+    }
+
+    fn peek_stack(&self, depth: usize) -> &Value {
+        &self.stack[self.stack.len() - 1 - depth]
     }
 
     fn read_byte(&mut self) -> u8 {
@@ -143,53 +187,92 @@ impl Vm {
         let offset = self.read_byte() as usize;
         self.current_chunk().constants[offset]
     }
+}
 
-    fn current_chunk(&self) -> &Chunk {
-        let object = &self.current_func().kind;
-        let ObjKind::Function { chunk, .. } = object else {
-            unreachable!()
-        };
-        chunk
+// =============================================================================
+// Call
+// =============================================================================
+
+impl Vm {
+    fn call(&mut self, func_ptr: *mut Obj, arg_count: u8) -> bool {
+      let arity = unsafe {
+          match &(*func_ptr).kind {
+              ObjKind::Function { arity, .. } => *arity,
+              ObjKind::Closure { function } => {
+                  let ObjKind::Function { arity, .. } = &(**function).kind else { unreachable!() };
+                  *arity
+              }
+              _ => unreachable!(),
+          }
+      };
+        if arg_count as usize != arity {
+            self.runtime_error(&format!(
+                "Expected {} arguments but got {}.",
+                arity, arg_count
+            ));
+            return false;
+        }
+        if self.frames.len() == FRAMES_MAX {
+            self.runtime_error("Stack overflow.");
+            return false;
+        }
+        let base_pointer = self.stack.len() - arg_count as usize - 1;
+        self.frames.push(CallFrame { function: func_ptr, ip: 0, base_pointer });
+        true
     }
 
-    fn current_func(&self) -> &Obj {
-        let frame = self.frames.last().unwrap();
-        unsafe { &*(frame.function) }
+    fn call_value(&mut self, callee: Value, arg_count: u8) -> bool {
+        if let Value::Obj(ptr) = callee
+            && matches!(unsafe { &(*ptr).kind }, ObjKind::Function { .. })
+        {
+            return self.call(ptr, arg_count);
+        }
+        if let Value::NativeFunction(native) = callee
+        {
+            let args = &self.stack[self.stack.len()-arg_count as usize..];
+            match native(args) {
+                Ok(val) => {
+                    self.stack.truncate(self.stack.len() - arg_count as usize - 1);
+                    self.stack.push(val);
+                    return true;
+                },
+                Err(e) => {
+                    self.runtime_error(&format!("Error in native function: {e}"));
+                    return false;
+                }
+            }
+        }
+        if let Value::Obj(ptr) = callee
+            && let ObjKind::Closure { function } = unsafe { &(*ptr).kind }
+        {
+            return self.call(*function, arg_count)
+        }
+        self.runtime_error("Can only call functions, closures, and classes.");
+        false
     }
+}
 
-    fn current_func_mut(&mut self) -> &mut Obj {
-        let frame = self.frames.last_mut().unwrap();
-        unsafe { &mut *(frame.function) }
-    }
+// =============================================================================
+// Execution
+// =============================================================================
 
-    fn current_ip(&self) -> usize {
-        let frame = self.frames.last().unwrap();
-        frame.ip
-    }
-
-    fn current_ip_mut(&mut self) -> &mut usize {
-        let frame = self.frames.last_mut().unwrap();
-        &mut frame.ip
-    }
-
+impl Vm {
     pub fn run(&mut self) -> InterpretResult {
         loop {
             if self.toggle_tracing {
                 print!("      ");
                 self.stack.iter().for_each(|val| print!("[{val}]"));
                 println!();
-                self.current_chunk()
-                    .disassemble_instruction(self.current_ip());
+                self.current_chunk().disassemble_instruction(self.current_ip());
             }
             match OpCode::from(self.read_byte()) {
                 OpCode::Jump => {
-                    // unconditional jump
                     let offset = self.read_short() as usize;
                     *self.current_ip_mut() += offset;
                 }
                 OpCode::JumpIfFalse => {
                     let offset = self.read_short() as usize;
-                    if self.is_falsey(*self.peek_stack(0)) {
+                    if is_falsey(*self.peek_stack(0)) {
                         *self.current_ip_mut() += offset;
                     }
                 }
@@ -204,14 +287,25 @@ impl Vm {
                         return InterpretResult::RuntimeError;
                     }
                 }
+                OpCode::Closure => {
+                    let Value::Obj(ptr) = self.read_constant() else { unreachable!() };
+                    assert!(matches!(&unsafe { &*ptr }.kind ,ObjKind::Function { .. }));
+                    let closure = Box::into_raw(Box::new(Obj {
+                        kind: ObjKind::Closure { function: ptr },
+                        next: self.objects,
+                        marked: false,
+                    }));
+                    self.objects = closure;
+                    self.stack.push(Value::Obj(closure));
+                }
                 OpCode::Return => {
                     let result = self.stack.pop().unwrap();
                     let bp = self.frames.pop().unwrap().base_pointer;
                     if self.frames.is_empty() {
-                        let _ = self.stack.pop(); // pop off the script function
+                        self.stack.pop(); // pop the script function
                         return InterpretResult::Ok;
                     }
-                    self.stack.truncate(bp); // chop off parts of the stack called function was using.
+                    self.stack.truncate(bp);
                     self.stack.push(result);
                 }
                 OpCode::Constant => {
@@ -222,44 +316,39 @@ impl Vm {
                 OpCode::True => self.stack.push(Value::Boolean(true)),
                 OpCode::False => self.stack.push(Value::Boolean(false)),
                 OpCode::Pop => {
-                    let _ = self.stack.pop();
+                    self.stack.pop();
                 }
                 OpCode::GetLocal => {
                     let slot = self.read_byte() as usize;
                     let base = self.frames.last().unwrap().base_pointer;
                     self.stack.push(self.stack[base + slot]);
                 }
-                OpCode::DefineGlobal => {
-                    // read the string `ObjString* name = READ_STRING();`
-                    let name = self.read_constant();
-                    let value = self.peek_stack(0);
-                    //set the global table `tableSet(&vm.globals, name, peek(0));`
-                    let key = unsafe { name.as_string() }.unwrap().to_string();
-                    self.globals.insert(key, *value);
-                    let _ = self.stack.pop(); // pop the stack
-                }
-                OpCode::SetGlobal => {
-                    let name = self.read_constant();
-
-                    let key = unsafe { name.as_string() }.unwrap();
-                    if self.globals.contains_key(key) {
-                        let value = self.peek_stack(0);
-                        self.globals.insert(key.to_string(), *value);
-                    } else {
-                        self.runtime_error(&format!("Undefined variable '{}'", name));
-                        return InterpretResult::RuntimeError;
-                    }
-                }
                 OpCode::SetLocal => {
                     let slot = self.read_byte() as usize;
                     let base = self.frames.last().unwrap().base_pointer;
                     self.stack[base + slot] = *self.peek_stack(0);
+                }
+                OpCode::DefineGlobal => {
+                    let name = self.read_constant();
+                    let key = unsafe { name.as_string() }.unwrap().to_string();
+                    self.globals.insert(key, *self.peek_stack(0));
+                    self.stack.pop();
                 }
                 OpCode::GetGlobal => {
                     let name = self.read_constant();
                     let key = unsafe { name.as_string() }.unwrap();
                     if let Some(val) = self.globals.get(key) {
                         self.stack.push(*val);
+                    } else {
+                        self.runtime_error(&format!("Undefined variable '{}'", name));
+                        return InterpretResult::RuntimeError;
+                    }
+                }
+                OpCode::SetGlobal => {
+                    let name = self.read_constant();
+                    let key = unsafe { name.as_string() }.unwrap();
+                    if self.globals.contains_key(key) {
+                        self.globals.insert(key.to_string(), *self.peek_stack(0));
                     } else {
                         self.runtime_error(&format!("Undefined variable '{}'", name));
                         return InterpretResult::RuntimeError;
@@ -312,8 +401,7 @@ impl Vm {
                     }
                 }
                 OpCode::Subtract => {
-                    let peeks = (self.peek_stack(0), self.peek_stack(1));
-                    if !matches!(peeks, (Value::Number(_), Value::Number(_))) {
+                    if !matches!((self.peek_stack(0), self.peek_stack(1)), (Value::Number(_), Value::Number(_))) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -322,8 +410,7 @@ impl Vm {
                     self.stack.push(x - y);
                 }
                 OpCode::Multiply => {
-                    let peeks = (self.peek_stack(0), self.peek_stack(1));
-                    if !matches!(peeks, (Value::Number(_), Value::Number(_))) {
+                    if !matches!((self.peek_stack(0), self.peek_stack(1)), (Value::Number(_), Value::Number(_))) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -332,8 +419,7 @@ impl Vm {
                     self.stack.push(x * y);
                 }
                 OpCode::Divide => {
-                    let peeks = (self.peek_stack(0), self.peek_stack(1));
-                    if !matches!(peeks, (Value::Number(_), Value::Number(_))) {
+                    if !matches!((self.peek_stack(0), self.peek_stack(1)), (Value::Number(_), Value::Number(_))) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -343,13 +429,11 @@ impl Vm {
                 }
                 OpCode::Not => {
                     let top = self.stack.pop().unwrap();
-                    let value = self.is_falsey(top);
-                    self.stack.push(Value::Boolean(value));
+                    self.stack.push(Value::Boolean(is_falsey(top)));
                 }
                 OpCode::Print => {
-                    let top = self.stack.pop().unwrap();
-                    println!("{top}");
-                } //_ => return InterpretResult::CompileError,
+                    println!("{}", self.stack.pop().unwrap());
+                }
             }
         }
     }
@@ -369,42 +453,28 @@ impl Vm {
             return false;
         }
 
-        let Value::Obj(ptr2) = self.stack.pop().unwrap() else {
-            panic!("invalid obj type")
-        };
-        let Value::Obj(ptr1) = self.stack.pop().unwrap() else {
-            panic!("invalid obj type")
-        };
-        let obj1 = unsafe { &*ptr1 };
-        let obj2 = unsafe { &*ptr2 };
+        let Value::Obj(ptr2) = self.stack.pop().unwrap() else { panic!("invalid obj type") };
+        let Value::Obj(ptr1) = self.stack.pop().unwrap() else { panic!("invalid obj type") };
+        let (obj1, obj2) = unsafe { (&*ptr1, &*ptr2) };
         match (&obj1.kind, &obj2.kind) {
             (ObjKind::String(s1), ObjKind::String(s2)) => {
                 let result = s1.clone() + s2.as_str();
                 if let Some(&ptr) = self.strings.get(&result) {
-                    self.stack.push(Value::Obj(ptr)); // push the result on the stack
+                    self.stack.push(Value::Obj(ptr));
                     return true;
                 }
-                let new_obj = Box::new(Obj {
+                let ptr = Box::into_raw(Box::new(Obj {
                     kind: ObjKind::String(result.clone()),
                     next: self.objects,
                     marked: false,
-                });
-                let ptr = Box::into_raw(new_obj);
-                self.strings.insert(result, ptr); // intern the string
-                self.objects = ptr; // update the GC linked list
-                self.stack.push(Value::Obj(ptr)); // push the result on the stack
+                }));
+                self.strings.insert(result, ptr);
+                self.objects = ptr;
+                self.stack.push(Value::Obj(ptr));
             }
             _ => panic!("invalid object types!"),
         }
         true
-    }
-
-    fn is_falsey(&self, val: Value) -> bool {
-        match val {
-            Value::Nil => true,
-            Value::Boolean(b) => !b,
-            _ => false,
-        }
     }
 
     fn runtime_error(&mut self, msg: &str) {
@@ -424,15 +494,6 @@ impl Vm {
     }
 }
 
-impl Drop for Vm {
-    // not super necessary since this is when the process would
-    // end anyhow
-    fn drop(&mut self) {
-        let mut obj = self.objects;
-        while !obj.is_null() {
-            let next = unsafe { (*obj).next };
-            drop(unsafe { Box::from_raw(obj) });
-            obj = next;
-        }
+    fn is_falsey(val: Value) -> bool {
+        matches!(val, Value::Nil | Value::Boolean(false))
     }
-}

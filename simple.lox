@@ -1,0 +1,7 @@
+fun f(x) {
+	print x;
+	return x+1;
+}
+
+var y = f(10);
+print y;
