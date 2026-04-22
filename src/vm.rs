@@ -5,7 +5,7 @@ use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::value::{Obj, ObjKind, Value};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 const FRAMES_MAX: usize = 64;
 const STACK_MAX: usize = FRAMES_MAX * u8::MAX as usize;
@@ -29,10 +29,9 @@ pub struct Vm {
     objects: *mut Obj,
     strings: HashMap<String, *mut Obj>,
     globals: HashMap<String, Value>,
-    // consider adding 
+    // consider adding
     // natives: HashMap<String, Arc<dyn Fn(&[Value]) -> Result<Value>>>
     // this would add the ability to use closures as native functions
-
     toggle_tracing: bool,
     toggle_debug_print: bool,
 }
@@ -68,13 +67,15 @@ impl Vm {
                 .as_secs_f64();
             Ok(Value::Number(secs))
         });
-        
+
         vm.define_native("sqrt", |args| {
             if args.len() != 1 {
                 bail!("'sqrt' only accepts 1 argument, got: {}", args.len());
             }
-            let Value::Number(x) = args[0] else { bail!("'sqrt' only accepts Numbers") };
-            Ok(Value::Number(x.sqrt())) 
+            let Value::Number(x) = args[0] else {
+                bail!("'sqrt' only accepts Numbers")
+            };
+            Ok(Value::Number(x.sqrt()))
         });
         vm
     }
@@ -112,7 +113,8 @@ impl Vm {
     }
 
     fn define_native(&mut self, name: &str, native_func: fn(&[Value]) -> Result<Value>) {
-        self.globals.insert(name.to_string(), Value::NativeFunction(native_func));
+        self.globals
+            .insert(name.to_string(), Value::NativeFunction(native_func));
     }
 }
 
@@ -132,25 +134,26 @@ impl Drop for Vm {
 // =============================================================================
 
 impl Vm {
-
-  fn resolve_function(ptr: *mut Obj) -> *mut Obj {
-      unsafe {
-          match &(*ptr).kind {
-              ObjKind::Function { .. } => ptr,
-              ObjKind::Closure { function } => *function,
-              _ => unreachable!(),
-          }
-      }
-  }
+    fn resolve_function(ptr: *mut Obj) -> *mut Obj {
+        unsafe {
+            match &(*ptr).kind {
+                ObjKind::Function { .. } => ptr,
+                ObjKind::Closure { function } => *function,
+                _ => unreachable!(),
+            }
+        }
+    }
 
     fn current_func(&self) -> &Obj {
         unsafe { &*Self::resolve_function(self.frames.last().unwrap().function) }
     }
 
-  fn current_chunk(&self) -> &Chunk {
-      let ObjKind::Function { chunk, .. } = &self.current_func().kind else { unreachable!() };
-      chunk
-  }
+    fn current_chunk(&self) -> &Chunk {
+        let ObjKind::Function { chunk, .. } = &self.current_func().kind else {
+            unreachable!()
+        };
+        chunk
+    }
 
     fn current_ip(&self) -> usize {
         self.frames.last().unwrap().ip
@@ -195,16 +198,18 @@ impl Vm {
 
 impl Vm {
     fn call(&mut self, func_ptr: *mut Obj, arg_count: u8) -> bool {
-      let arity = unsafe {
-          match &(*func_ptr).kind {
-              ObjKind::Function { arity, .. } => *arity,
-              ObjKind::Closure { function } => {
-                  let ObjKind::Function { arity, .. } = &(**function).kind else { unreachable!() };
-                  *arity
-              }
-              _ => unreachable!(),
-          }
-      };
+        let arity = unsafe {
+            match &(*func_ptr).kind {
+                ObjKind::Function { arity, .. } => *arity,
+                ObjKind::Closure { function } => {
+                    let ObjKind::Function { arity, .. } = &(**function).kind else {
+                        unreachable!()
+                    };
+                    *arity
+                }
+                _ => unreachable!(),
+            }
+        };
         if arg_count as usize != arity {
             self.runtime_error(&format!(
                 "Expected {} arguments but got {}.",
@@ -217,7 +222,11 @@ impl Vm {
             return false;
         }
         let base_pointer = self.stack.len() - arg_count as usize - 1;
-        self.frames.push(CallFrame { function: func_ptr, ip: 0, base_pointer });
+        self.frames.push(CallFrame {
+            function: func_ptr,
+            ip: 0,
+            base_pointer,
+        });
         true
     }
 
@@ -227,15 +236,15 @@ impl Vm {
         {
             return self.call(ptr, arg_count);
         }
-        if let Value::NativeFunction(native) = callee
-        {
-            let args = &self.stack[self.stack.len()-arg_count as usize..];
+        if let Value::NativeFunction(native) = callee {
+            let args = &self.stack[self.stack.len() - arg_count as usize..];
             match native(args) {
                 Ok(val) => {
-                    self.stack.truncate(self.stack.len() - arg_count as usize - 1);
+                    self.stack
+                        .truncate(self.stack.len() - arg_count as usize - 1);
                     self.stack.push(val);
                     return true;
-                },
+                }
                 Err(e) => {
                     self.runtime_error(&format!("Error in native function: {e}"));
                     return false;
@@ -243,9 +252,9 @@ impl Vm {
             }
         }
         if let Value::Obj(ptr) = callee
-            && let ObjKind::Closure { function } = unsafe { &(*ptr).kind }
+            && let ObjKind::Closure { .. } = unsafe { &(*ptr).kind }
         {
-            return self.call(*function, arg_count)
+            return self.call(ptr, arg_count);
         }
         self.runtime_error("Can only call functions, closures, and classes.");
         false
@@ -263,7 +272,8 @@ impl Vm {
                 print!("      ");
                 self.stack.iter().for_each(|val| print!("[{val}]"));
                 println!();
-                self.current_chunk().disassemble_instruction(self.current_ip());
+                self.current_chunk()
+                    .disassemble_instruction(self.current_ip());
             }
             match OpCode::from(self.read_byte()) {
                 OpCode::Jump => {
@@ -288,8 +298,10 @@ impl Vm {
                     }
                 }
                 OpCode::Closure => {
-                    let Value::Obj(ptr) = self.read_constant() else { unreachable!() };
-                    assert!(matches!(&unsafe { &*ptr }.kind ,ObjKind::Function { .. }));
+                    let Value::Obj(ptr) = self.read_constant() else {
+                        unreachable!()
+                    };
+                    assert!(matches!(&unsafe { &*ptr }.kind, ObjKind::Function { .. }));
                     let closure = Box::into_raw(Box::new(Obj {
                         kind: ObjKind::Closure { function: ptr },
                         next: self.objects,
@@ -401,7 +413,10 @@ impl Vm {
                     }
                 }
                 OpCode::Subtract => {
-                    if !matches!((self.peek_stack(0), self.peek_stack(1)), (Value::Number(_), Value::Number(_))) {
+                    if !matches!(
+                        (self.peek_stack(0), self.peek_stack(1)),
+                        (Value::Number(_), Value::Number(_))
+                    ) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -410,7 +425,10 @@ impl Vm {
                     self.stack.push(x - y);
                 }
                 OpCode::Multiply => {
-                    if !matches!((self.peek_stack(0), self.peek_stack(1)), (Value::Number(_), Value::Number(_))) {
+                    if !matches!(
+                        (self.peek_stack(0), self.peek_stack(1)),
+                        (Value::Number(_), Value::Number(_))
+                    ) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -419,7 +437,10 @@ impl Vm {
                     self.stack.push(x * y);
                 }
                 OpCode::Divide => {
-                    if !matches!((self.peek_stack(0), self.peek_stack(1)), (Value::Number(_), Value::Number(_))) {
+                    if !matches!(
+                        (self.peek_stack(0), self.peek_stack(1)),
+                        (Value::Number(_), Value::Number(_))
+                    ) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -453,8 +474,12 @@ impl Vm {
             return false;
         }
 
-        let Value::Obj(ptr2) = self.stack.pop().unwrap() else { panic!("invalid obj type") };
-        let Value::Obj(ptr1) = self.stack.pop().unwrap() else { panic!("invalid obj type") };
+        let Value::Obj(ptr2) = self.stack.pop().unwrap() else {
+            panic!("invalid obj type")
+        };
+        let Value::Obj(ptr1) = self.stack.pop().unwrap() else {
+            panic!("invalid obj type")
+        };
         let (obj1, obj2) = unsafe { (&*ptr1, &*ptr2) };
         match (&obj1.kind, &obj2.kind) {
             (ObjKind::String(s1), ObjKind::String(s2)) => {
@@ -480,7 +505,8 @@ impl Vm {
     fn runtime_error(&mut self, msg: &str) {
         eprintln!("{msg}");
         for frame in self.frames.iter().rev() {
-            let ObjKind::Function { name, chunk, .. } = &unsafe { &*frame.function }.kind else {
+            let func_ptr = Self::resolve_function(frame.function);
+            let ObjKind::Function { name, chunk, .. } = &unsafe { &*func_ptr }.kind else {
                 unreachable!()
             };
             let line = chunk.lines[frame.ip - 1];
@@ -494,6 +520,6 @@ impl Vm {
     }
 }
 
-    fn is_falsey(val: Value) -> bool {
-        matches!(val, Value::Nil | Value::Boolean(false))
-    }
+fn is_falsey(val: Value) -> bool {
+    matches!(val, Value::Nil | Value::Boolean(false))
+}

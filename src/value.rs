@@ -37,7 +37,7 @@ pub enum ObjKind {
     },
     Closure {
         function: *mut Obj,
-    }
+    },
 }
 
 impl Value {
@@ -62,7 +62,9 @@ impl std::fmt::Display for Value {
                     ObjKind::Function { name, .. } if name.is_empty() => write!(f, "<script>"),
                     ObjKind::Function { name, .. } => write!(f, "<fn {name}>"),
                     ObjKind::Closure { function: ptr } => {
-                        let ObjKind::Function { name, .. } = (unsafe { &(**ptr).kind }) else { unreachable!() };
+                        let ObjKind::Function { name, .. } = (unsafe { &(**ptr).kind }) else {
+                            unreachable!()
+                        };
                         write!(f, "<closure {name}>")
                     }
                 }

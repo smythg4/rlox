@@ -106,8 +106,14 @@ rlox --debug test.lox
 - Stack traces on runtime errors
 - Panic-mode error recovery with synchronization
 
+- Native functions (`clock`, `sqrt`) with `fn(&[Value]) -> Result<Value>` signature
+- REPL continues after compile/runtime errors
+
 **In progress**
 
-- Closures
+- Closures (object infrastructure and `OpCode::Closure` in place; upvalue capture not yet implemented)
+
+**Not yet started**
+
 - Classes and inheritance
 - Mark-and-sweep garbage collection (linked list infrastructure is in place)

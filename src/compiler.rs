@@ -578,7 +578,10 @@ impl<'a> Compiler<'a> {
             self.emit_byte(OpCode::Nil as u8);
         }
 
-        self.consume(TokenKind::Semicolon, "Expect ';' after variable declaration");
+        self.consume(
+            TokenKind::Semicolon,
+            "Expect ';' after variable declaration",
+        );
         self.define_variable(global);
     }
 
@@ -625,11 +628,26 @@ impl<'a> Compiler<'a> {
 
     fn statement(&mut self) {
         match self.current.kind {
-            TokenKind::Print => { self.advance(); self.print_statement(); }
-            TokenKind::If => { self.advance(); self.if_statement(); }
-            TokenKind::While => { self.advance(); self.while_statement(); }
-            TokenKind::For => { self.advance(); self.for_statement(); }
-            TokenKind::Return => { self.advance(); self.return_statement(); }
+            TokenKind::Print => {
+                self.advance();
+                self.print_statement();
+            }
+            TokenKind::If => {
+                self.advance();
+                self.if_statement();
+            }
+            TokenKind::While => {
+                self.advance();
+                self.while_statement();
+            }
+            TokenKind::For => {
+                self.advance();
+                self.for_statement();
+            }
+            TokenKind::Return => {
+                self.advance();
+                self.return_statement();
+            }
             TokenKind::LeftBrace => {
                 self.advance();
                 self.begin_scope();
@@ -765,7 +783,10 @@ impl<'a> Compiler<'a> {
         if let Ok(value) = self.previous.lexeme.parse::<f64>() {
             self.emit_constant(Value::Number(value));
         } else {
-            self.error(&format!("invalid number literal '{}'", self.previous.lexeme));
+            self.error(&format!(
+                "invalid number literal '{}'",
+                self.previous.lexeme
+            ));
         }
     }
 
