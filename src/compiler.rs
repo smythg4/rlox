@@ -11,6 +11,7 @@ struct CompilerContext {
     function_kind: FunctionKind, // top-level or user-defined function
     locals: Vec<Local>,
     scope_depth: usize,
+    upvalues: Vec<UpValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,13 @@ impl From<TokenKind> for Precedence {
 struct Local {
     name: Token,          // name
     depth: Option<usize>, // `None` means uninitialized
+    is_captured: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UpValue {
+    index: usize,
+    is_local: bool,
 }
 
 pub struct Compiler<'a> {
@@ -153,6 +161,7 @@ impl<'a> Compiler<'a> {
                 arity: 0,
                 name,
                 chunk: Chunk::default(),
+                upvalue_count: 0,
             },
             next: *self.objects,
             marked: false,
@@ -165,18 +174,22 @@ impl<'a> Compiler<'a> {
                 line: 0,
             },
             depth: Some(0),
+            is_captured: false,
         };
         self.contexts.push(CompilerContext {
             function: func_obj,
             function_kind: kind,
             locals: vec![dummy],
             scope_depth: 0,
+            upvalues: Vec::new(),
         });
     }
 
     fn end_compiler(&mut self) -> *mut Obj {
         self.emit_return();
         let context = self.contexts.pop().unwrap();
+        // SAFETY: context.function was allocated via Box::into_raw in push_context
+        // and is still live — end_compiler is the only site that consumes the context.
         let object = unsafe { &(*context.function).kind };
         let ObjKind::Function { chunk, .. } = object else {
             panic!("Attempt to return a non-function object from compiler")
@@ -193,6 +206,8 @@ impl<'a> Compiler<'a> {
 
     fn current_chunk(&self) -> &Chunk {
         let context = self.contexts.last().unwrap();
+        // SAFETY: context.function is a live Box::into_raw allocation for the duration
+        // of this CompilerContext's presence in self.contexts.
         let object = unsafe { &(*context.function).kind };
         let ObjKind::Function { chunk, .. } = object else {
             unreachable!()
@@ -202,6 +217,7 @@ impl<'a> Compiler<'a> {
 
     fn current_chunk_mut(&mut self) -> &mut Chunk {
         let context = self.contexts.last_mut().unwrap();
+        // SAFETY: same as current_chunk; &mut self ensures exclusive access.
         let object = unsafe { &mut (*context.function).kind };
         let ObjKind::Function { chunk, .. } = object else {
             unreachable!()
@@ -211,11 +227,13 @@ impl<'a> Compiler<'a> {
 
     fn current_function(&self) -> &ObjKind {
         let context = self.contexts.last().unwrap();
+        // SAFETY: same as current_chunk.
         unsafe { &(*context.function).kind }
     }
 
     fn current_function_mut(&mut self) -> &mut ObjKind {
         let context = self.contexts.last().unwrap();
+        // SAFETY: same as current_chunk; &mut self ensures exclusive access.
         unsafe { &mut (*context.function).kind }
     }
 
@@ -324,8 +342,13 @@ impl<'a> Compiler<'a> {
             if !should_pop {
                 break;
             }
-            self.emit_byte(OpCode::Pop as u8);
-            let _ = self.contexts.last_mut().unwrap().locals.pop();
+            let is_captured = ctx.locals.last().unwrap().is_captured;
+            ctx.locals.pop();
+            if is_captured {
+                self.emit_byte(OpCode::CloseUpvalue as u8);
+            } else {
+                self.emit_byte(OpCode::Pop as u8);
+            }
         }
     }
 
@@ -374,20 +397,68 @@ impl<'a> Compiler<'a> {
         self.current_locals_mut().push(Local {
             name: local_token,
             depth: None,
+            is_captured: false,
         });
     }
 
-    fn resolve_local(&mut self, name: &Token) -> Option<u8> {
-        for i in (0..self.current_local_count()).rev() {
-            let local = &self.current_locals()[i];
-            if Self::identifiers_equal(name, &local.name) {
-                if local.depth.is_none() {
-                    self.error("Can't read local variable in its own initializer.");
-                }
-                return Some(i as u8);
+    fn resolve_local_in(&mut self, ctx_idx: usize, name: &Token) -> Option<u8> {
+        let locals = &self.contexts[ctx_idx].locals;
+        for i in (0..locals.len()).rev() {
+            if Self::identifiers_equal(name, &locals[i].name) {
+                return locals[i].depth.map(|_| i as u8);
             }
         }
         None
+    }
+
+    fn resolve_local(&mut self, name: &Token) -> Option<u8> {
+        let idx = self.contexts.len() - 1;
+        self.resolve_local_in(idx, name)
+    }
+
+    fn resolve_upvalue_in(&mut self, ctx_idx: usize, name: &Token) -> Option<u8> {
+        if ctx_idx == 0 {
+            return None;
+        }
+        if let Some(local) = self.resolve_local_in(ctx_idx - 1, name) {
+            self.contexts[ctx_idx - 1].locals[local as usize].is_captured = true;
+            return Some(self.add_upvalue_in(ctx_idx, local as usize, true));
+        }
+        if let Some(upvalue) = self.resolve_upvalue_in(ctx_idx - 1, name) {
+            return Some(self.add_upvalue_in(ctx_idx, upvalue as usize, false));
+        }
+        None
+    }
+
+    fn resolve_upvalue(&mut self, name: &Token) -> Option<u8> {
+        let idx = self.contexts.len() - 1;
+        self.resolve_upvalue_in(idx, name)
+    }
+
+    fn add_upvalue(&mut self, index: usize, is_local: bool) -> u8 {
+        let idx = self.contexts.len() - 1;
+        self.add_upvalue_in(idx, index, is_local)
+    }
+
+    fn add_upvalue_in(&mut self, ctx_id: usize, index: usize, is_local: bool) -> u8 {
+        let ctx = &mut self.contexts[ctx_id];
+        // SAFETY: same as current_func_mut
+        let ObjKind::Function { upvalue_count, .. } = (unsafe { &mut (*ctx.function).kind }) else {
+            unreachable!()
+        };
+        for i in 0..*upvalue_count {
+            let uv = ctx.upvalues[i];
+            if uv.index == index && uv.is_local == is_local {
+                return i as u8;
+            }
+        }
+        if *upvalue_count >= u8::MAX as usize {
+            self.error("too many closure variables in function.");
+            return 0;
+        }
+        ctx.upvalues.push(UpValue { index, is_local });
+        *upvalue_count += 1;
+        (*upvalue_count - 1) as u8
     }
 
     fn parse_variable(&mut self, msg: &str) -> u8 {
@@ -619,9 +690,18 @@ impl<'a> Compiler<'a> {
         self.consume(TokenKind::LeftBrace, "Expect '{' before function body.");
         self.block();
 
+        let upvalues = std::mem::take(&mut self.contexts.last_mut().unwrap().upvalues);
         let function = self.end_compiler();
         let constant = self.make_constant(Value::Obj(function));
         self.emit_bytes(OpCode::Closure as u8, constant);
+
+        let ObjKind::Function { upvalue_count, .. } = unsafe { &*function }.kind else {
+            unreachable!()
+        };
+        for uv in upvalues.iter().take(upvalue_count) {
+            self.emit_byte(uv.is_local as u8);
+            self.emit_byte(uv.index as u8);
+        }
     }
 
     // --- statements ---
@@ -803,6 +883,8 @@ impl<'a> Compiler<'a> {
     fn named_variable(&mut self, name: Token, can_assign: bool) {
         let (get_op, set_op, arg) = if let Some(slot) = self.resolve_local(&name) {
             (OpCode::GetLocal as u8, OpCode::SetLocal as u8, slot)
+        } else if let Some(upvalue) = self.resolve_upvalue(&name) {
+            (OpCode::GetUpValue as u8, OpCode::SetUpValue as u8, upvalue)
         } else {
             let arg = self.identifier_constant(name);
             (OpCode::GetGlobal as u8, OpCode::SetGlobal as u8, arg)

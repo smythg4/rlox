@@ -1,4 +1,4 @@
-use crate::value::Value;
+use crate::value::{ObjKind, Value};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +13,8 @@ pub enum OpCode {
     GetGlobal,
     DefineGlobal,
     SetGlobal,
+    GetUpValue,
+    SetUpValue,
     Equal,
     Greater,
     Less,
@@ -28,6 +30,7 @@ pub enum OpCode {
     Loop,
     Call,
     Closure,
+    CloseUpvalue,
     Return,
 }
 
@@ -97,17 +100,42 @@ impl Chunk {
             | OpCode::Divide
             | OpCode::Multiply
             | OpCode::Subtract
-            | OpCode::Add => offset + self.simple_instruction(offset),
-            OpCode::GetLocal | OpCode::SetLocal | OpCode::Call => {
-                offset + self.byte_instruction(offset)
-            }
+            | OpCode::Add
+            | OpCode::CloseUpvalue => offset + self.simple_instruction(offset),
+            OpCode::GetLocal
+            | OpCode::SetLocal
+            | OpCode::Call
+            | OpCode::GetUpValue
+            | OpCode::SetUpValue => offset + self.byte_instruction(offset),
             OpCode::Jump | OpCode::JumpIfFalse => offset + self.jump_instruction(1, offset),
             OpCode::Loop => offset + self.jump_instruction(-1, offset),
             OpCode::Closure => {
                 let const_idx = self.codes[offset + 1] as usize;
                 print!("{:<16} {} ", op_code, const_idx);
                 println!("{}", self.constants[const_idx]);
-                offset + 2
+
+                // SAFETY: the complier always places an ObjKind::Function as the Closure
+                // constant operand; the pointer is live for the VM's lifetime
+                let upvalue_count = if let Value::Obj(ptr) = self.constants[const_idx] {
+                    unsafe {
+                        if let ObjKind::Function { upvalue_count, .. } = &(*ptr).kind {
+                            *upvalue_count
+                        } else {
+                            0
+                        }
+                    }
+                } else {
+                    0
+                };
+
+                for i in 0..upvalue_count {
+                    let base = offset + 2 + i * 2;
+                    let is_local = self.codes[base] != 0;
+                    let index = self.codes[base + 1];
+                    let kind = if is_local { "local" } else { "upvalue" };
+                    println!("{:04}      |                     {} {}", base, kind, index);
+                }
+                offset + 2 + upvalue_count * 2
             }
         }
     }

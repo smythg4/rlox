@@ -34,19 +34,27 @@ pub enum ObjKind {
         arity: usize,
         name: String,
         chunk: Chunk,
+        upvalue_count: usize,
     },
     Closure {
         function: *mut Obj,
+        upvalues: Vec<*mut Obj>,
+    },
+    UpValue {
+        location: *mut Value,
+        closed: Value,
     },
 }
 
 impl Value {
+    /// # Safety
+    /// `ptr` inside `Value::Obj` must be non-null and point to a live `Obj`
+    /// allocated by the VM's GC linked list.
     pub unsafe fn as_string(&self) -> Option<&str> {
-        unsafe {
-            match self {
-                Value::Obj(ptr) => (*(*ptr)).as_string(),
-                _ => None,
-            }
+        match self {
+            // SAFETY: caller guarantees ptr is non-null and points to a live Obj.
+            Value::Obj(ptr) => unsafe { (*(*ptr)).as_string() },
+            _ => None,
         }
     }
 }
@@ -56,17 +64,22 @@ impl std::fmt::Display for Value {
             Value::Number(n) => write!(f, "{n}"),
             Value::Boolean(b) => write!(f, "{b}"),
             Value::Obj(ptr) => {
+                // SAFETY: all Value::Obj pointers originate from Box::into_raw and
+                // remain valid until the VM's Drop frees them.
                 let obj = unsafe { &**ptr };
                 match &obj.kind {
                     ObjKind::String(s) => write!(f, "{s}"),
                     ObjKind::Function { name, .. } if name.is_empty() => write!(f, "<script>"),
                     ObjKind::Function { name, .. } => write!(f, "<fn {name}>"),
-                    ObjKind::Closure { function: ptr } => {
+                    ObjKind::Closure { function: ptr, .. } => {
+                        // SAFETY: ObjKind::Closure::function always points to an ObjKind::Function;
+                        // this invariant is enforced at construction in OpCode::Closure.
                         let ObjKind::Function { name, .. } = (unsafe { &(**ptr).kind }) else {
                             unreachable!()
                         };
                         write!(f, "<closure {name}>")
                     }
+                    ObjKind::UpValue { .. } => write!(f, "upvalue"),
                 }
             }
             Value::Nil => write!(f, "nil"),

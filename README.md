@@ -7,57 +7,55 @@ Lox is a dynamically typed scripting language. clox is its bytecode-compiled imp
 ## Example
 
 ```lox
-fun factorial(n) {
-  if (n <= 1) return 1;
-  return n * factorial(n - 1);
+// basic capture
+fun make_adder(x) {
+  fun add(y) {
+    return x + y;
+  }
+  return add;
 }
 
-fun first_over(limit) {
-  var n = 0;
-  while (true) {
-    n = n + 1;
-    if (n * n > limit) return n;
+var add5 = make_adder(5);
+print add5(3);   // 8
+print add5(10);  // 15
+
+// mutation over multiple calls
+fun make_counter(start) {
+  var count = start;
+  fun increment() {
+    count = count + 1;
+    return count;
+  }
+  return increment;
+}
+
+var counter = make_counter(0);
+print counter();  // 1
+print counter();  // 2
+print counter();  // 3
+
+// upvalue closed over after block scope exits
+fun make_adder2(x) {
+  {
+    var offset = 100;
+    fun add(y) {
+      return x + y + offset;
+    }
+    return add;
   }
 }
 
-print factorial(5);
-print factorial(10);
-print first_over(20);
-print first_over(100);
-
-var w = 0;
-while (w < 6) {
-  for (var f = 10; f < 14 and w < 3; f = f + 1) {
-    print f;
-  }
-  w = w + 1;
-  print w;
-}
+var add5_offset = make_adder2(5);
+print add5_offset(3);  // 108
 ```
 
 ```
-120
-3628800
-5
-11
-10
-11
-12
-13
+8
+15
 1
-10
-11
-12
-13
 2
-10
-11
-12
-13
 3
-4
-5
-6
+108
 ```
 
 ## Building
@@ -105,13 +103,14 @@ rlox --debug test.lox
 - Recursion
 - Stack traces on runtime errors
 - Panic-mode error recovery with synchronization
-
 - Native functions (`clock`, `sqrt`) with `fn(&[Value]) -> Result<Value>` signature
 - REPL continues after compile/runtime errors
-
-**In progress**
-
-- Closures (object infrastructure and `OpCode::Closure` in place; upvalue capture not yet implemented)
+- Closures with full upvalue capture
+  - Open upvalues: `location` points into the stack while the enclosing frame is live
+  - Closed upvalues: self-referential heap objects — `location` redirects to `closed` on frame exit
+  - `CloseUpvalue` opcode for mid-function block scope exits
+  - Shared upvalues: multiple closures over the same variable reuse a single `ObjUpvalue`
+  - Upvalue relay: closures more than one scope level deep chain upvalue descriptors through intermediate contexts
 
 **Not yet started**
 

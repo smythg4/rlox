@@ -32,6 +32,8 @@ pub struct Vm {
     // consider adding
     // natives: HashMap<String, Arc<dyn Fn(&[Value]) -> Result<Value>>>
     // this would add the ability to use closures as native functions
+    open_upvalues: Vec<*mut Obj>,
+
     toggle_tracing: bool,
     toggle_debug_print: bool,
 }
@@ -55,6 +57,8 @@ impl Vm {
             objects: std::ptr::null_mut(),
             strings: HashMap::new(),
             globals: HashMap::new(),
+
+            open_upvalues: Vec::new(),
 
             toggle_tracing: false,
             toggle_debug_print: false,
@@ -100,7 +104,18 @@ impl Vm {
         match compiler.compile() {
             Ok(func_obj) => {
                 self.stack.push(Value::Obj(func_obj));
-                self.call(func_obj, 0);
+                let closure = Box::into_raw(Box::new(Obj {
+                    kind: ObjKind::Closure {
+                        function: func_obj,
+                        upvalues: Vec::new(),
+                    },
+                    next: self.objects,
+                    marked: false,
+                }));
+                self.objects = closure;
+                let _ = self.stack.pop();
+                self.stack.push(Value::Obj(closure));
+                self.call(closure, 0);
                 self.run()
             }
             Err(_) => InterpretResult::CompileError,
@@ -122,6 +137,8 @@ impl Drop for Vm {
     fn drop(&mut self) {
         let mut obj = self.objects;
         while !obj.is_null() {
+            // SAFETY: every Obj in the linked list was allocated with Box::into_raw.
+            // We walk next before dropping so the pointer remains valid for the read.
             let next = unsafe { (*obj).next };
             drop(unsafe { Box::from_raw(obj) });
             obj = next;
@@ -135,16 +152,22 @@ impl Drop for Vm {
 
 impl Vm {
     fn resolve_function(ptr: *mut Obj) -> *mut Obj {
+        // SAFETY: ptr must be non-null and point to a live Obj. Callers pass either
+        // CallFrame::function (set in call()) or a Value::Obj from the stack, both of
+        // which originate from Box::into_raw and remain live until VM drop.
+        // The Closure branch's inner function pointer is always an ObjKind::Function
+        // by the invariant enforced in OpCode::Closure.
         unsafe {
             match &(*ptr).kind {
                 ObjKind::Function { .. } => ptr,
-                ObjKind::Closure { function } => *function,
+                ObjKind::Closure { function, .. } => *function,
                 _ => unreachable!(),
             }
         }
     }
 
     fn current_func(&self) -> &Obj {
+        // SAFETY: resolve_function returns a valid pointer; see its SAFETY comment.
         unsafe { &*Self::resolve_function(self.frames.last().unwrap().function) }
     }
 
@@ -198,10 +221,12 @@ impl Vm {
 
 impl Vm {
     fn call(&mut self, func_ptr: *mut Obj, arg_count: u8) -> bool {
+        // SAFETY: func_ptr comes from call_value, which extracted it from a Value::Obj
+        // on the stack. All Value::Obj pointers are live Box::into_raw allocations.
         let arity = unsafe {
             match &(*func_ptr).kind {
                 ObjKind::Function { arity, .. } => *arity,
-                ObjKind::Closure { function } => {
+                ObjKind::Closure { function, .. } => {
                     let ObjKind::Function { arity, .. } = &(**function).kind else {
                         unreachable!()
                     };
@@ -231,6 +256,8 @@ impl Vm {
     }
 
     fn call_value(&mut self, callee: Value, arg_count: u8) -> bool {
+        // SAFETY: ptr is a Value::Obj extracted from the stack; all such pointers are
+        // live Box::into_raw allocations for the duration of the VM's run loop.
         if let Value::Obj(ptr) = callee
             && matches!(unsafe { &(*ptr).kind }, ObjKind::Function { .. })
         {
@@ -251,6 +278,7 @@ impl Vm {
                 }
             }
         }
+        // SAFETY: same as the Function branch above.
         if let Value::Obj(ptr) = callee
             && let ObjKind::Closure { .. } = unsafe { &(*ptr).kind }
         {
@@ -258,6 +286,33 @@ impl Vm {
         }
         self.runtime_error("Can only call functions, closures, and classes.");
         false
+    }
+
+    fn capture_upvalue(&mut self, slot: usize) -> *mut Obj {
+        let base = self.frames.last().unwrap().base_pointer;
+        let location = &mut self.stack[base + slot] as *mut Value;
+
+        // reuse existing open upvalue for this stack slot if one exists
+        for &uv_ptr in &self.open_upvalues {
+            // SAFETY: open_upvalues contains live ObjKind::UpValue allocations.
+            if let ObjKind::UpValue { location: loc, .. } = unsafe { &(*uv_ptr).kind }
+                && *loc == location
+            {
+                return uv_ptr;
+            }
+        }
+
+        let upvalue = Box::into_raw(Box::new(Obj {
+            kind: ObjKind::UpValue {
+                location,
+                closed: Value::Nil,
+            },
+            next: self.objects,
+            marked: false,
+        }));
+        self.objects = upvalue;
+        self.open_upvalues.push(upvalue);
+        upvalue
     }
 }
 
@@ -301,14 +356,51 @@ impl Vm {
                     let Value::Obj(ptr) = self.read_constant() else {
                         unreachable!()
                     };
+                    // SAFETY: ptr came from read_constant, which copied it from the
+                    // constants pool — a live Box::into_raw allocation.
                     assert!(matches!(&unsafe { &*ptr }.kind, ObjKind::Function { .. }));
+
+                    let upvalue_count = unsafe {
+                        let ObjKind::Function { upvalue_count, .. } = &(*ptr).kind else {
+                            unreachable!()
+                        };
+                        *upvalue_count
+                    };
+                    let mut upvalues = Vec::with_capacity(upvalue_count);
+                    for _ in 0..upvalue_count {
+                        let is_local = self.read_byte() != 0;
+                        let index = self.read_byte() as usize;
+                        if is_local {
+                            upvalues.push(self.capture_upvalue(index));
+                        } else {
+                            // reuse upvalue from enclosing closure
+                            let enclosing = self.frames.last().unwrap().function;
+                            // SAFETY: enclosing frame's function is a live Closure obj.
+                            let ObjKind::Closure {
+                                upvalues: enc_upvalues,
+                                ..
+                            } = (unsafe { &(*enclosing).kind })
+                            else {
+                                unreachable!()
+                            };
+                            upvalues.push(enc_upvalues[index]);
+                        }
+                    }
+
                     let closure = Box::into_raw(Box::new(Obj {
-                        kind: ObjKind::Closure { function: ptr },
+                        kind: ObjKind::Closure {
+                            function: ptr,
+                            upvalues,
+                        },
                         next: self.objects,
                         marked: false,
                     }));
                     self.objects = closure;
                     self.stack.push(Value::Obj(closure));
+                }
+                OpCode::CloseUpvalue => {
+                    self.close_upvalues(self.stack.len() - 1);
+                    self.stack.pop();
                 }
                 OpCode::Return => {
                     let result = self.stack.pop().unwrap();
@@ -317,6 +409,7 @@ impl Vm {
                         self.stack.pop(); // pop the script function
                         return InterpretResult::Ok;
                     }
+                    self.close_upvalues(bp);
                     self.stack.truncate(bp);
                     self.stack.push(result);
                 }
@@ -342,12 +435,15 @@ impl Vm {
                 }
                 OpCode::DefineGlobal => {
                     let name = self.read_constant();
+                    // SAFETY: the compiler always emits a string constant as the operand
+                    // for DefineGlobal/GetGlobal/SetGlobal; the pointer is live.
                     let key = unsafe { name.as_string() }.unwrap().to_string();
                     self.globals.insert(key, *self.peek_stack(0));
                     self.stack.pop();
                 }
                 OpCode::GetGlobal => {
                     let name = self.read_constant();
+                    // SAFETY: same as DefineGlobal.
                     let key = unsafe { name.as_string() }.unwrap();
                     if let Some(val) = self.globals.get(key) {
                         self.stack.push(*val);
@@ -358,6 +454,7 @@ impl Vm {
                 }
                 OpCode::SetGlobal => {
                     let name = self.read_constant();
+                    // SAFETY: same as DefineGlobal.
                     let key = unsafe { name.as_string() }.unwrap();
                     if self.globals.contains_key(key) {
                         self.globals.insert(key.to_string(), *self.peek_stack(0));
@@ -370,6 +467,38 @@ impl Vm {
                     let y = self.stack.pop().unwrap();
                     let x = self.stack.pop().unwrap();
                     self.stack.push(Value::Boolean(x == y));
+                }
+                OpCode::GetUpValue => {
+                    let slot = self.read_byte() as usize;
+                    let func_ptr = self.frames.last().unwrap().function;
+                    // sAFETY: frame.function is a live Closure; upvalues[slot] is a live upvalue.
+                    let val = unsafe {
+                        let ObjKind::Closure { upvalues, .. } = &(*func_ptr).kind else {
+                            unreachable!()
+                        };
+                        let uv_ptr = upvalues[slot];
+                        let ObjKind::UpValue { location, .. } = &(*uv_ptr).kind else {
+                            unreachable!()
+                        };
+                        **location
+                    };
+                    self.stack.push(val);
+                }
+                OpCode::SetUpValue => {
+                    let slot = self.read_byte() as usize;
+                    let val = *self.peek_stack(0);
+                    let func_ptr = self.frames.last().unwrap().function;
+                    // SAFETY: same as GetUpValue.
+                    unsafe {
+                        let ObjKind::Closure { upvalues, .. } = &(*func_ptr).kind else {
+                            unreachable!()
+                        };
+                        let uv_ptr = upvalues[slot];
+                        let ObjKind::UpValue { location, .. } = &(*uv_ptr).kind else {
+                            unreachable!()
+                        };
+                        **location = val;
+                    };
                 }
                 OpCode::Greater => {
                     let y = self.stack.pop().unwrap();
@@ -464,6 +593,8 @@ impl Vm {
             (Value::Obj(p1), Value::Obj(p2)) => (*p1, *p2),
             _ => return false,
         };
+        // SAFETY: p1 and p2 were copied from Value::Obj entries on the stack,
+        // both of which are live Box::into_raw allocations.
         let is_strings = unsafe {
             matches!(
                 (&(*p1).kind, &(*p2).kind),
@@ -480,6 +611,8 @@ impl Vm {
         let Value::Obj(ptr1) = self.stack.pop().unwrap() else {
             panic!("invalid obj type")
         };
+        // SAFETY: ptr1/ptr2 were just popped from the stack; is_strings confirmed they
+        // are live string objects. No other references exist after the pop.
         let (obj1, obj2) = unsafe { (&*ptr1, &*ptr2) };
         match (&obj1.kind, &obj2.kind) {
             (ObjKind::String(s1), ObjKind::String(s2)) => {
@@ -506,6 +639,7 @@ impl Vm {
         eprintln!("{msg}");
         for frame in self.frames.iter().rev() {
             let func_ptr = Self::resolve_function(frame.function);
+            // SAFETY: resolve_function returns a valid Function pointer; see its SAFETY comment.
             let ObjKind::Function { name, chunk, .. } = &unsafe { &*func_ptr }.kind else {
                 unreachable!()
             };
@@ -517,6 +651,23 @@ impl Vm {
             }
         }
         self.reset_stack();
+    }
+
+    fn close_upvalues(&mut self, base: usize) {
+        let base_ptr = &self.stack[base] as *const Value;
+        self.open_upvalues.retain(|&uv_ptr| {
+            // SAFETY: open_upvalues contains live ObjKind::UpValue allocations.
+            let ObjKind::UpValue { location, closed } = (unsafe { &mut (*uv_ptr).kind }) else {
+                unreachable!()
+            };
+            if *location as *const Value >= base_ptr {
+                *closed = unsafe { **location };
+                *location = closed as *mut Value;
+                false // remove from open_values
+            } else {
+                true // keep in open_values
+            }
+        })
     }
 }
 
