@@ -1,3 +1,11 @@
+// --- test gc ---
+  fun make_garbage() {
+    fun inner() { return 1; }
+  }
+  make_garbage();
+  make_garbage();
+  make_garbage();
+
 // --- closures: basic capture ---
 fun make_adder(x) {
   fun add(y) {

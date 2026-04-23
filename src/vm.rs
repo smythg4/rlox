@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 
 const FRAMES_MAX: usize = 64;
 const STACK_MAX: usize = FRAMES_MAX * u8::MAX as usize;
+const GC_HEAP_GROWTH_FACTOR: usize = 2;
 
 pub enum InterpretResult {
     Ok,
@@ -36,6 +37,11 @@ pub struct Vm {
 
     toggle_tracing: bool,
     toggle_debug_print: bool,
+    toggle_gc_log: bool,
+
+    bytes_allocated: usize,
+    next_gc: usize,
+    grey_stack: Vec<*mut Obj>,
 }
 
 // =============================================================================
@@ -62,6 +68,11 @@ impl Vm {
 
             toggle_tracing: false,
             toggle_debug_print: false,
+            toggle_gc_log: false,
+
+            bytes_allocated: 0,
+            next_gc: 1024, //1024*1024,
+            grey_stack: Vec::new(),
         };
 
         vm.define_native("clock", |_args| {
@@ -94,6 +105,11 @@ impl Vm {
         self
     }
 
+    pub fn with_gc_log(mut self) -> Self {
+        self.toggle_gc_log = true;
+        self
+    }
+
     pub fn interpret(&mut self, source: &str) -> InterpretResult {
         let lexer = Lexer::from(source);
         let mut compiler = Compiler::new(lexer, &mut self.objects, &mut self.strings);
@@ -104,15 +120,10 @@ impl Vm {
         match compiler.compile() {
             Ok(func_obj) => {
                 self.stack.push(Value::Obj(func_obj));
-                let closure = Box::into_raw(Box::new(Obj {
-                    kind: ObjKind::Closure {
-                        function: func_obj,
-                        upvalues: Vec::new(),
-                    },
-                    next: self.objects,
-                    marked: false,
-                }));
-                self.objects = closure;
+                let closure = self.alloc_obj(ObjKind::Closure {
+                    function: func_obj,
+                    upvalues: Vec::new(),
+                });
                 let _ = self.stack.pop();
                 self.stack.push(Value::Obj(closure));
                 self.call(closure, 0);
@@ -130,6 +141,187 @@ impl Vm {
     fn define_native(&mut self, name: &str, native_func: fn(&[Value]) -> Result<Value>) {
         self.globals
             .insert(name.to_string(), Value::NativeFunction(native_func));
+    }
+
+    fn alloc_obj(&mut self, kind: ObjKind) -> *mut Obj {
+        self.bytes_allocated += std::mem::size_of::<Obj>() + kind.heap_size();
+        if self.toggle_gc_log {
+            eprintln!(
+                "allocating {} bytes for an object",
+                std::mem::size_of::<Obj>() + kind.heap_size()
+            );
+        }
+        if self.bytes_allocated > self.next_gc {
+            self.collect_garbage();
+        }
+        let ptr = Box::into_raw(Box::new(Obj {
+            kind,
+            next: self.objects,
+            marked: false,
+        }));
+        self.objects = ptr;
+        ptr
+    }
+
+    fn collect_garbage(&mut self) {
+        if self.toggle_gc_log {
+            eprintln!("-- gc begin");
+        }
+        let before = self.bytes_allocated;
+        self.mark_roots();
+        self.trace_references();
+        self.table_remove_white();
+        self.sweep();
+        self.next_gc = self.bytes_allocated * GC_HEAP_GROWTH_FACTOR;
+        if self.toggle_gc_log {
+            eprintln!("-- gc end");
+            eprintln!(
+                "   collected {} bytes (from {} to {}), next at {}",
+                before - self.bytes_allocated,
+                before,
+                self.bytes_allocated,
+                self.next_gc
+            );
+        }
+    }
+
+    fn mark_roots(&mut self) {
+        let stack_ptrs: Vec<*mut Obj> = self
+            .stack
+            .iter()
+            .filter_map(|sv| {
+                if let Value::Obj(ptr) = sv {
+                    Some(*ptr)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for ptr in stack_ptrs {
+            self.mark_object(ptr, "Stack");
+        }
+        let frames_ptrs: Vec<*mut Obj> = self.frames.iter().map(|frame| frame.function).collect();
+        for ptr in frames_ptrs {
+            self.mark_object(ptr, "Frames");
+        }
+        let upvalue_ptrs: Vec<*mut Obj> = self.open_upvalues.to_vec();
+        for ptr in upvalue_ptrs {
+            self.mark_object(ptr, "Upvalues");
+        }
+        let global_ptrs: Vec<*mut Obj> = self
+            .globals
+            .values()
+            .filter_map(|v| {
+                if let Value::Obj(ptr) = v {
+                    Some(*ptr)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for ptr in global_ptrs {
+            self.mark_object(ptr, "Global");
+        }
+        // my design doesn't allow for directly marking roots generated
+        // by the compiler. Nystrom has a `markCompilerRoots` in his C.
+        // we will catch compiler allocations when we walk the memory tree
+        // e.g. stack[0] → script closure → script function → chunk.constants...
+    }
+
+    fn mark_object(&mut self, obj_ptr: *mut Obj, source: &str) {
+        if obj_ptr.is_null() {
+            return;
+        }
+        let obj = unsafe { &mut *obj_ptr };
+        if obj.marked {
+            return;
+        }
+        if self.toggle_gc_log {
+            println!("{source}: {} mark ", Value::Obj(obj));
+        }
+        obj.marked = true;
+
+        self.grey_stack.push(obj);
+    }
+
+    fn trace_references(&mut self) {
+        while let Some(obj) = self.grey_stack.pop() {
+            self.blacken_object(obj);
+        }
+    }
+
+    fn blacken_object(&mut self, obj: *mut Obj) {
+        if self.toggle_gc_log {
+            println!("{:?} blacken {}", obj, Value::Obj(obj));
+        }
+
+        match unsafe { &(*obj).kind } {
+            ObjKind::UpValue { location, .. } => {
+                if let Value::Obj(ptr) = unsafe { **location } {
+                    self.mark_object(ptr, "Trace upvalue");
+                }
+            }
+            ObjKind::Function { chunk, .. } => {
+                chunk
+                    .constants
+                    .iter()
+                    .filter_map(|v| {
+                        if let Value::Obj(ptr) = v {
+                            Some(*ptr)
+                        } else {
+                            None
+                        }
+                    })
+                    .for_each(|o| self.mark_object(o, "Function chunk"));
+            }
+            ObjKind::Closure { function, upvalues } => {
+                self.mark_object(*function, "Closure Function");
+                upvalues
+                    .iter()
+                    .for_each(|uv| self.mark_object(*uv, "Closure Upvalue"));
+            }
+            _ => {}
+        }
+    }
+
+    fn table_remove_white(&mut self) {
+        let keys_to_remove: Vec<_> = self
+            .strings
+            .iter()
+            .filter(|(k, v)| !k.is_empty() && !unsafe { &***v }.marked)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &keys_to_remove {
+            self.strings.remove(k);
+        }
+    }
+
+    fn sweep(&mut self) {
+        let mut previous = std::ptr::null_mut();
+        let mut object = self.objects;
+
+        while !object.is_null() {
+            if unsafe { &*object }.marked {
+                unsafe { &mut *object }.marked = false;
+                previous = object;
+                object = unsafe { &*object }.next;
+            } else {
+                let unreached = object;
+                object = unsafe { &*object }.next;
+                if !previous.is_null() {
+                    unsafe { &mut *previous }.next = object;
+                } else {
+                    self.objects = object;
+                }
+
+                if self.toggle_gc_log {
+                    println!("free: {}", Value::Obj(unreached));
+                }
+                let size = size_of::<Obj>() + unsafe { &*unreached }.kind.heap_size();
+                let _ = unsafe { Box::from_raw(unreached) };
+                self.bytes_allocated -= size;
+            }
+        }
     }
 }
 
@@ -302,15 +494,10 @@ impl Vm {
             }
         }
 
-        let upvalue = Box::into_raw(Box::new(Obj {
-            kind: ObjKind::UpValue {
-                location,
-                closed: Value::Nil,
-            },
-            next: self.objects,
-            marked: false,
-        }));
-        self.objects = upvalue;
+        let upvalue = self.alloc_obj(ObjKind::UpValue {
+            location,
+            closed: Value::Nil,
+        });
         self.open_upvalues.push(upvalue);
         upvalue
     }
@@ -387,15 +574,10 @@ impl Vm {
                         }
                     }
 
-                    let closure = Box::into_raw(Box::new(Obj {
-                        kind: ObjKind::Closure {
-                            function: ptr,
-                            upvalues,
-                        },
-                        next: self.objects,
-                        marked: false,
-                    }));
-                    self.objects = closure;
+                    let closure = self.alloc_obj(ObjKind::Closure {
+                        function: ptr,
+                        upvalues,
+                    });
                     self.stack.push(Value::Obj(closure));
                 }
                 OpCode::CloseUpvalue => {
@@ -605,10 +787,10 @@ impl Vm {
             return false;
         }
 
-        let Value::Obj(ptr2) = self.stack.pop().unwrap() else {
+        let Value::Obj(ptr2) = *self.peek_stack(0) else {
             panic!("invalid obj type")
         };
-        let Value::Obj(ptr1) = self.stack.pop().unwrap() else {
+        let Value::Obj(ptr1) = *self.peek_stack(1) else {
             panic!("invalid obj type")
         };
         // SAFETY: ptr1/ptr2 were just popped from the stack; is_strings confirmed they
@@ -618,16 +800,16 @@ impl Vm {
             (ObjKind::String(s1), ObjKind::String(s2)) => {
                 let result = s1.clone() + s2.as_str();
                 if let Some(&ptr) = self.strings.get(&result) {
+                    let _ = self.stack.pop(); // pop ptr2 off the stack
+                    let _ = self.stack.pop(); // pop ptr1 off the stack
                     self.stack.push(Value::Obj(ptr));
                     return true;
                 }
-                let ptr = Box::into_raw(Box::new(Obj {
-                    kind: ObjKind::String(result.clone()),
-                    next: self.objects,
-                    marked: false,
-                }));
+                let ptr = self.alloc_obj(ObjKind::String(result.clone()));
+
                 self.strings.insert(result, ptr);
-                self.objects = ptr;
+                let _ = self.stack.pop(); // pop ptr2 off the stack
+                let _ = self.stack.pop(); // pop ptr1 off the stack
                 self.stack.push(Value::Obj(ptr));
             }
             _ => panic!("invalid object types!"),

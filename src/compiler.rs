@@ -225,11 +225,11 @@ impl<'a> Compiler<'a> {
         chunk
     }
 
-    fn current_function(&self) -> &ObjKind {
-        let context = self.contexts.last().unwrap();
-        // SAFETY: same as current_chunk.
-        unsafe { &(*context.function).kind }
-    }
+    // fn current_function(&self) -> &ObjKind {
+    //     let context = self.contexts.last().unwrap();
+    //     // SAFETY: same as current_chunk.
+    //     unsafe { &(*context.function).kind }
+    // }
 
     fn current_function_mut(&mut self) -> &mut ObjKind {
         let context = self.contexts.last().unwrap();
@@ -435,10 +435,10 @@ impl<'a> Compiler<'a> {
         self.resolve_upvalue_in(idx, name)
     }
 
-    fn add_upvalue(&mut self, index: usize, is_local: bool) -> u8 {
-        let idx = self.contexts.len() - 1;
-        self.add_upvalue_in(idx, index, is_local)
-    }
+    // fn add_upvalue(&mut self, index: usize, is_local: bool) -> u8 {
+    //     let idx = self.contexts.len() - 1;
+    //     self.add_upvalue_in(idx, index, is_local)
+    // }
 
     fn add_upvalue_in(&mut self, ctx_id: usize, index: usize, is_local: bool) -> u8 {
         let ctx = &mut self.contexts[ctx_id];

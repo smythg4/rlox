@@ -13,6 +13,7 @@ pub enum Value {
     NativeFunction(fn(&[Value]) -> Result<Value>),
 }
 
+#[derive(Debug)]
 pub struct Obj {
     pub kind: ObjKind,
     pub next: *mut Obj,
@@ -28,6 +29,7 @@ impl Obj {
     }
 }
 
+#[derive(Debug)]
 pub enum ObjKind {
     String(String),
     Function {
@@ -44,6 +46,21 @@ pub enum ObjKind {
         location: *mut Value,
         closed: Value,
     },
+}
+
+impl ObjKind {
+    pub fn heap_size(&self) -> usize {
+        match self {
+            ObjKind::String(s) => s.capacity(),
+            ObjKind::Function { chunk, .. } => {
+                chunk.codes.capacity()
+                    + chunk.constants.capacity() * size_of::<Value>()
+                    + chunk.lines.capacity() * size_of::<usize>()
+            }
+            ObjKind::Closure { upvalues, .. } => upvalues.capacity() * size_of::<*mut Obj>(),
+            ObjKind::UpValue { .. } => 0,
+        }
+    }
 }
 
 impl Value {

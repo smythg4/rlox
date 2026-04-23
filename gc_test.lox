@@ -1,0 +1,34 @@
+// --- closures that become unreachable ---
+// each call creates an inner closure that is never returned or stored
+fun make_garbage() {
+  fun inner() { return 1; }
+}
+make_garbage();
+make_garbage();
+make_garbage();
+
+// --- concatenated strings that become unreachable ---
+// the result of + is a new heap object not in any constants pool
+var i = 0;
+while (i < 5) {
+  var s = "hel" + "lo";
+  i = i + 1;
+}
+
+// --- upvalues that become unreachable ---
+// counter2 goes out of scope and its closure + upvalue become garbage
+{
+  fun make_counter() {
+    var n = 0;
+    fun increment() {
+      n = n + 1;
+      return n;
+    }
+    return increment;
+  }
+  var counter2 = make_counter();
+  counter2();
+  counter2();
+}
+
+print "done";

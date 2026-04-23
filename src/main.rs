@@ -19,6 +19,10 @@ struct Cli {
     /// debug print enabled
     #[arg(short, long)]
     debug: bool,
+
+    /// gc logging enabled
+    #[arg(short, long)]
+    gc_logging: bool,
 }
 
 fn main() -> Result<()> {
@@ -30,6 +34,9 @@ fn main() -> Result<()> {
     }
     if cli.tracing {
         vm = vm.with_tracing();
+    }
+    if cli.gc_logging {
+        vm = vm.with_gc_log();
     }
 
     if let Some(path) = cli.filename {

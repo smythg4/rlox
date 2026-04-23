@@ -79,6 +79,7 @@ rlox
 # Flags
 -d, --debug      Print bytecode disassembly before execution
 -t, --tracing    Trace stack and instruction at runtime
+-g, --gc-log     Print GC activity (allocations, mark/sweep, collections)
 
 # Run the example with disassembly
 rlox --debug test.lox
@@ -109,10 +110,16 @@ rlox --debug test.lox
   - Open upvalues: `location` points into the stack while the enclosing frame is live
   - Closed upvalues: self-referential heap objects — `location` redirects to `closed` on frame exit
   - `CloseUpvalue` opcode for mid-function block scope exits
-  - Shared upvalues: multiple closures over the same variable reuse a single `ObjUpvalue`
-  - Upvalue relay: closures more than one scope level deep chain upvalue descriptors through intermediate contexts
+  - Shared upvalues: multiple closures over the same variable reuse a single upvalue object
+  - Upvalue relay: closures more than one scope level deep chain descriptors through intermediate contexts
+- Mark-and-sweep garbage collector
+  - Tri-color marking: white (unvisited), grey (marked, children untraced), black (fully traced)
+  - Roots: value stack, call frames, open upvalues, globals
+  - Transitive tracing via grey worklist — compiler allocations reached through constants pool chain
+  - Weak string intern table: dead strings evicted before sweep via `table_remove_white`
+  - Heap size tracked per-object including owned allocations (`String`, `Vec`, `Chunk` buffers)
+  - GC threshold grows by 2× after each collection
 
 **Not yet started**
 
 - Classes and inheritance
-- Mark-and-sweep garbage collection (linked list infrastructure is in place)
