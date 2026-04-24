@@ -7,20 +7,26 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(
+    version,
+    about = "rlox — a Lox bytecode VM written in Rust",
+    long_about = "rlox compiles and executes Lox source files using a single-pass bytecode\n\
+                  compiler and a stack-based VM with mark-and-sweep garbage collection.\n\n\
+                  If no file is provided, rlox starts an interactive REPL."
+)]
 struct Cli {
-    /// filename
+    /// Lox source file to execute. Omit to start the REPL.
     filename: Option<PathBuf>,
 
-    /// tracing enabled
+    /// Print a full stack and instruction trace on every VM cycle.
     #[arg(short, long)]
     tracing: bool,
 
-    /// debug print enabled
+    /// Disassemble compiled bytecode before execution.
     #[arg(short, long)]
     debug: bool,
 
-    /// gc logging enabled
+    /// Log GC activity: allocations, mark/sweep cycles, and freed objects.
     #[arg(short, long)]
     gc_logging: bool,
 }

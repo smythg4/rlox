@@ -15,6 +15,8 @@ pub enum OpCode {
     SetGlobal,
     GetUpValue,
     SetUpValue,
+    SetProperty,
+    GetProperty,
     Equal,
     Greater,
     Less,
@@ -32,6 +34,7 @@ pub enum OpCode {
     Closure,
     CloseUpvalue,
     Return,
+    Class,
 }
 
 impl std::fmt::Display for OpCode {
@@ -83,9 +86,13 @@ impl Chunk {
         }
         let op_code = OpCode::from(self.codes[offset]);
         match op_code {
-            OpCode::Constant | OpCode::DefineGlobal | OpCode::GetGlobal | OpCode::SetGlobal => {
-                offset + self.constant_instruction(offset)
-            }
+            OpCode::Constant
+            | OpCode::DefineGlobal
+            | OpCode::GetGlobal
+            | OpCode::SetGlobal
+            | OpCode::GetProperty
+            | OpCode::SetProperty
+            | OpCode::Class => offset + self.constant_instruction(offset),
             OpCode::Return
             | OpCode::False
             | OpCode::True

@@ -1,22 +1,23 @@
 // --- closures that become unreachable ---
-// each call creates an inner closure that is never returned or stored
 fun make_garbage() {
   fun inner() { return 1; }
 }
-make_garbage();
-make_garbage();
-make_garbage();
+var g = 0;
+while (g < 10) {
+  make_garbage();
+  g = g + 1;
+}
 
 // --- concatenated strings that become unreachable ---
-// the result of + is a new heap object not in any constants pool
 var i = 0;
-while (i < 5) {
+while (i < 20) {
   var s = "hel" + "lo";
+  var t = "foo" + "bar";
+  var u = "baz" + "qux";
   i = i + 1;
 }
 
 // --- upvalues that become unreachable ---
-// counter2 goes out of scope and its closure + upvalue become garbage
 {
   fun make_counter() {
     var n = 0;
@@ -26,9 +27,36 @@ while (i < 5) {
     }
     return increment;
   }
-  var counter2 = make_counter();
-  counter2();
-  counter2();
+  var c1 = make_counter();
+  var c2 = make_counter();
+  var c3 = make_counter();
+  c1(); c1(); c1();
+  c2(); c2();
+  c3();
+}
+
+// --- instances that become unreachable ---
+class Crumb {}
+var j = 0;
+while (j < 10) {
+  var c = Crumb();
+  c.x = j;
+  c.y = j + 1;
+  c.label = "crumb" + "s";
+  j = j + 1;
+  c.name = "blargh";
+}
+
+// --- instances with closure fields ---
+class Box {}
+{
+  fun make_adder(x) {
+    fun add(y) { return x + y; }
+    return add;
+  }
+  var b = Box();
+  b.add5 = make_adder(5);
+  b.add10 = make_adder(10);
 }
 
 print "done";

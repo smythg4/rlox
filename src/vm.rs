@@ -71,7 +71,7 @@ impl Vm {
             toggle_gc_log: false,
 
             bytes_allocated: 0,
-            next_gc: 1024, //1024*1024,
+            next_gc: 1024 * 2,
             grey_stack: Vec::new(),
         };
 
@@ -280,6 +280,25 @@ impl Vm {
                     .iter()
                     .for_each(|uv| self.mark_object(*uv, "Closure Upvalue"));
             }
+            ObjKind::Class { name: _ } => {
+                // just a string right now...
+            }
+            ObjKind::ClassInstance { klass, fields } => {
+                self.mark_object(*klass, "Instance class");
+                let field_ptrs: Vec<_> = fields
+                    .values()
+                    .filter_map(|v| {
+                        if let Value::Obj(ptr) = v {
+                            Some(*ptr)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for ptr in field_ptrs {
+                    self.mark_object(ptr, "instance fields");
+                }
+            }
             _ => {}
         }
     }
@@ -476,6 +495,19 @@ impl Vm {
         {
             return self.call(ptr, arg_count);
         }
+
+        if let Value::Obj(ptr) = callee
+            && let ObjKind::Class { .. } = unsafe { &(*ptr).kind }
+        {
+            let kind = ObjKind::ClassInstance {
+                klass: ptr,
+                fields: HashMap::new(),
+            };
+            let ptr = self.alloc_obj(kind);
+            let slot = self.stack.len() - arg_count as usize - 1;
+            self.stack[slot] = Value::Obj(ptr);
+            return true;
+        }
         self.runtime_error("Can only call functions, closures, and classes.");
         false
     }
@@ -645,6 +677,46 @@ impl Vm {
                         return InterpretResult::RuntimeError;
                     }
                 }
+                OpCode::GetProperty => {
+                    let instance = *self.peek_stack(0);
+                    let name = self.read_constant();
+                    // SAFETY: same as DefineGlobal.
+                    let key = unsafe { name.as_string() }.unwrap();
+                    let Value::Obj(inst_ptr) = instance else {
+                        unreachable!()
+                    };
+                    let ObjKind::ClassInstance { ref fields, .. } = unsafe { &*inst_ptr }.kind
+                    else {
+                        self.runtime_error("Only instances have properties.");
+                        return InterpretResult::RuntimeError;
+                    };
+                    if let Some(val) = fields.get(key) {
+                        self.stack.pop(); // instance
+                        self.stack.push(*val);
+                    } else {
+                        self.runtime_error(&format!("undefined property {key}"));
+                        return InterpretResult::RuntimeError;
+                    }
+                }
+                OpCode::SetProperty => {
+                    let instance = *self.peek_stack(1);
+                    let name = self.read_constant();
+                    // SAFETY: same as DefineGlobal.
+                    let key = unsafe { name.as_string() }.unwrap();
+                    let Value::Obj(inst_ptr) = instance else {
+                        unreachable!()
+                    };
+                    let ObjKind::ClassInstance { ref mut fields, .. } =
+                        unsafe { &mut *inst_ptr }.kind
+                    else {
+                        self.runtime_error("Only instances have properties.");
+                        return InterpretResult::RuntimeError;
+                    };
+                    fields.insert(key.to_string(), *self.peek_stack(0));
+                    let value = self.stack.pop().unwrap();
+                    let _ = self.stack.pop();
+                    self.stack.push(value);
+                }
                 OpCode::Equal => {
                     let y = self.stack.pop().unwrap();
                     let x = self.stack.pop().unwrap();
@@ -765,6 +837,17 @@ impl Vm {
                 }
                 OpCode::Print => {
                     println!("{}", self.stack.pop().unwrap());
+                }
+                OpCode::Class => {
+                    let thing = self.read_constant();
+                    let Value::Obj(ptr) = thing else {
+                        unreachable!()
+                    };
+                    let ObjKind::String(name) = &(unsafe { &*ptr }.kind) else {
+                        unreachable!()
+                    };
+                    let ptr = self.alloc_obj(ObjKind::Class { name: name.clone() });
+                    self.stack.push(Value::Obj(ptr));
                 }
             }
         }

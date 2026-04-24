@@ -57,7 +57,7 @@ impl From<TokenKind> for Precedence {
             | TokenKind::LessEqual => Precedence::Comparison,
             TokenKind::And => Precedence::And,
             TokenKind::Or => Precedence::Or,
-            TokenKind::LeftParen => Precedence::Call,
+            TokenKind::LeftParen | TokenKind::Dot => Precedence::Call,
             _ => Precedence::None,
         }
     }
@@ -585,7 +585,7 @@ impl<'a> Compiler<'a> {
 
         while precedence <= Precedence::from(self.current.kind) {
             self.advance();
-            self.call_infix(self.previous.kind);
+            self.call_infix(self.previous.kind, can_assign);
         }
 
         if can_assign && self.current.kind == TokenKind::Equal {
@@ -605,7 +605,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn call_infix(&mut self, kind: TokenKind) {
+    fn call_infix(&mut self, kind: TokenKind, can_assign: bool) {
         match kind {
             TokenKind::Plus
             | TokenKind::Minus
@@ -620,6 +620,7 @@ impl<'a> Compiler<'a> {
             TokenKind::And => self.and_expr(),
             TokenKind::Or => self.or_expr(),
             TokenKind::LeftParen => self.call(),
+            TokenKind::Dot => self.dot_expr(can_assign),
             _ => {}
         }
     }
@@ -631,6 +632,8 @@ impl<'a> Compiler<'a> {
             self.var_declaration();
         } else if self.peek_match(TokenKind::Fun) {
             self.fun_declaration();
+        } else if self.peek_match(TokenKind::Class) {
+            self.class_declaration();
         } else {
             self.statement();
         }
@@ -702,6 +705,18 @@ impl<'a> Compiler<'a> {
             self.emit_byte(uv.is_local as u8);
             self.emit_byte(uv.index as u8);
         }
+    }
+
+    fn class_declaration(&mut self) {
+        self.consume(TokenKind::Identifier, "expect a class name.");
+        let name_constant = self.identifier_constant(self.previous.clone());
+        self.declare_variable();
+
+        self.emit_bytes(OpCode::Class as u8, name_constant);
+        self.define_variable(name_constant);
+
+        self.consume(TokenKind::LeftBrace, "Expect '{' before class body.");
+        self.consume(TokenKind::RightBrace, "Expect '}' after class body.");
     }
 
     // --- statements ---
@@ -949,6 +964,18 @@ impl<'a> Compiler<'a> {
         self.emit_byte(OpCode::Pop as u8);
         self.parse_precedence(Precedence::Or);
         self.patch_jump(end_jump);
+    }
+
+    fn dot_expr(&mut self, can_assign: bool) {
+        self.consume(TokenKind::Identifier, "expect property name after '.'");
+        let name = self.identifier_constant(self.previous.clone());
+
+        if can_assign && self.peek_match(TokenKind::Equal) {
+            self.expression();
+            self.emit_bytes(OpCode::SetProperty as u8, name);
+        } else {
+            self.emit_bytes(OpCode::GetProperty as u8, name);
+        }
     }
 
     fn call(&mut self) {

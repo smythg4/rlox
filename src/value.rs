@@ -1,5 +1,6 @@
 use crate::chunk::Chunk;
 use std::cmp::{PartialEq, PartialOrd};
+use std::collections::HashMap;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use anyhow::Result;
@@ -46,6 +47,13 @@ pub enum ObjKind {
         location: *mut Value,
         closed: Value,
     },
+    Class {
+        name: String,
+    },
+    ClassInstance {
+        klass: *mut Obj,
+        fields: HashMap<String, Value>,
+    },
 }
 
 impl ObjKind {
@@ -59,6 +67,11 @@ impl ObjKind {
             }
             ObjKind::Closure { upvalues, .. } => upvalues.capacity() * size_of::<*mut Obj>(),
             ObjKind::UpValue { .. } => 0,
+            ObjKind::Class { name } => name.capacity(),
+            ObjKind::ClassInstance { fields, .. } => fields
+                .keys()
+                .map(|key| key.capacity() + size_of::<Value>())
+                .sum(),
         }
     }
 }
@@ -97,6 +110,10 @@ impl std::fmt::Display for Value {
                         write!(f, "<closure {name}>")
                     }
                     ObjKind::UpValue { .. } => write!(f, "upvalue"),
+                    ObjKind::Class { name } => write!(f, "{name}"),
+                    ObjKind::ClassInstance { klass, .. } => {
+                        write!(f, "{} instance", Value::Obj(*klass))
+                    }
                 }
             }
             Value::Nil => write!(f, "nil"),
