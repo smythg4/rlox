@@ -31,10 +31,12 @@ pub enum OpCode {
     JumpIfFalse,
     Loop,
     Call,
+    Invoke,
     Closure,
     CloseUpvalue,
     Return,
     Class,
+    Method,
 }
 
 impl std::fmt::Display for OpCode {
@@ -92,7 +94,8 @@ impl Chunk {
             | OpCode::SetGlobal
             | OpCode::GetProperty
             | OpCode::SetProperty
-            | OpCode::Class => offset + self.constant_instruction(offset),
+            | OpCode::Class
+            | OpCode::Method => offset + self.constant_instruction(offset),
             OpCode::Return
             | OpCode::False
             | OpCode::True
@@ -116,6 +119,7 @@ impl Chunk {
             | OpCode::SetUpValue => offset + self.byte_instruction(offset),
             OpCode::Jump | OpCode::JumpIfFalse => offset + self.jump_instruction(1, offset),
             OpCode::Loop => offset + self.jump_instruction(-1, offset),
+            OpCode::Invoke => offset + self.invoke_instruction(offset),
             OpCode::Closure => {
                 let const_idx = self.codes[offset + 1] as usize;
                 print!("{:<16} {} ", op_code, const_idx);
@@ -193,6 +197,14 @@ impl Chunk {
             offset,
             offset as isize + 3 + sign * jump
         );
+        3
+    }
+
+    fn invoke_instruction(&self, offset: usize) -> usize {
+        let op_code = OpCode::from(self.codes[offset]);
+        let const_idx = self.codes[offset+1] as usize;
+        let arg_count = self.codes[offset+2];
+        println!("{:<16} ({} args) {:04} '{}'", op_code, arg_count, const_idx, self.constants[const_idx]);
         3
     }
 }

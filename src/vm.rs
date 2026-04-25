@@ -71,7 +71,7 @@ impl Vm {
             toggle_gc_log: false,
 
             bytes_allocated: 0,
-            next_gc: 1024 * 2,
+            next_gc: 1024*1024,
             grey_stack: Vec::new(),
         };
 
@@ -244,6 +244,12 @@ impl Vm {
         self.grey_stack.push(obj);
     }
 
+    fn mark_value(&mut self, val: Value, source: &str) {
+        if let Value::Obj(ptr) = val {
+            self.mark_object(ptr, source);
+        }
+    }
+
     fn trace_references(&mut self) {
         while let Some(obj) = self.grey_stack.pop() {
             self.blacken_object(obj);
@@ -280,24 +286,45 @@ impl Vm {
                     .iter()
                     .for_each(|uv| self.mark_object(*uv, "Closure Upvalue"));
             }
-            ObjKind::Class { name: _ } => {
-                // just a string right now...
+            ObjKind::Class { methods, .. } => {
+                // let method_ptrs: Vec<*mut Obj> = methods
+                //     .values()
+                //     .filter_map(|v| {
+                //         if let Value::Obj(ptr) = v {
+                //             Some(*ptr)
+                //         } else {
+                //             None
+                //         }
+                //     }).collect();
+                // for ptr in method_ptrs {
+                //     self.mark_object(ptr, "class method");
+                // }
+                methods
+                    .values()
+                    .for_each(|v| self.mark_value(*v, "class method"));
             }
             ObjKind::ClassInstance { klass, fields } => {
                 self.mark_object(*klass, "Instance class");
-                let field_ptrs: Vec<_> = fields
+                // let field_ptrs: Vec<_> = fields
+                //     .values()
+                //     .filter_map(|v| {
+                //         if let Value::Obj(ptr) = v {
+                //             Some(*ptr)
+                //         } else {
+                //             None
+                //         }
+                //     })
+                //     .collect();
+                // for ptr in field_ptrs {
+                //     self.mark_object(ptr, "instance fields");
+                // }
+                fields
                     .values()
-                    .filter_map(|v| {
-                        if let Value::Obj(ptr) = v {
-                            Some(*ptr)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                for ptr in field_ptrs {
-                    self.mark_object(ptr, "instance fields");
-                }
+                    .for_each(|v| self.mark_value(*v, "instance fields"));
+            }
+            ObjKind::BoundMethod { receiver, method } => {
+                self.mark_value(*receiver, "method receiver");
+                self.mark_object(*method, "bound method");
             }
             _ => {}
         }
@@ -424,6 +451,14 @@ impl Vm {
         let offset = self.read_byte() as usize;
         self.current_chunk().constants[offset]
     }
+
+    fn read_string_constant<'a>(&mut self) -> &'a str {
+      let name = self.read_constant();
+      // SAFETY: name is a Value::Obj pointing to an interned ObjKind::String in the
+      // GC heap. String constants in the chunk are always reachable roots, so this
+      // Obj won't be freed for the duration of this borrow.
+      unsafe { std::mem::transmute(name.as_string().unwrap()) }
+    }
 }
 
 // =============================================================================
@@ -467,13 +502,6 @@ impl Vm {
     }
 
     fn call_value(&mut self, callee: Value, arg_count: u8) -> bool {
-        // SAFETY: ptr is a Value::Obj extracted from the stack; all such pointers are
-        // live Box::into_raw allocations for the duration of the VM's run loop.
-        if let Value::Obj(ptr) = callee
-            && matches!(unsafe { &(*ptr).kind }, ObjKind::Function { .. })
-        {
-            return self.call(ptr, arg_count);
-        }
         if let Value::NativeFunction(native) = callee {
             let args = &self.stack[self.stack.len() - arg_count as usize..];
             match native(args) {
@@ -489,27 +517,71 @@ impl Vm {
                 }
             }
         }
-        // SAFETY: same as the Function branch above.
-        if let Value::Obj(ptr) = callee
-            && let ObjKind::Closure { .. } = unsafe { &(*ptr).kind }
-        {
-            return self.call(ptr, arg_count);
-        }
 
-        if let Value::Obj(ptr) = callee
-            && let ObjKind::Class { .. } = unsafe { &(*ptr).kind }
-        {
-            let kind = ObjKind::ClassInstance {
-                klass: ptr,
-                fields: HashMap::new(),
-            };
-            let ptr = self.alloc_obj(kind);
-            let slot = self.stack.len() - arg_count as usize - 1;
-            self.stack[slot] = Value::Obj(ptr);
-            return true;
+        let Value::Obj(ptr) = callee else {
+            self.runtime_error("Can only call objects.");
+            return false;
+        };
+
+        match unsafe { &(*ptr).kind } {
+            ObjKind::Function { .. } | ObjKind::Closure { .. } => self.call(ptr, arg_count),
+            ObjKind::Class { .. } => {
+                let instance = self.alloc_obj(ObjKind::ClassInstance {
+                    klass: ptr,
+                    fields: HashMap::new(),
+                });
+                let slot = self.stack.len() - arg_count as usize - 1;
+                self.stack[slot] = Value::Obj(instance);
+                if let ObjKind::Class { methods, .. } = unsafe { &(*ptr).kind } && let Some(init_val) = methods.get("init") {
+                    let Value::Obj(init_ptr) = *init_val else { unreachable!() };
+                    return self.call(init_ptr, arg_count);
+                } else if arg_count > 0 {
+                    self.runtime_error("Expected 0 arguments but got {arg_count}.");
+                    return false;
+                }
+                true
+            }
+            ObjKind::BoundMethod { receiver, method } => {
+                let receiver = *receiver;
+                let method = *method;
+                let ok = self.call(method, arg_count);
+                if ok {
+                    let bp = self.frames.last().unwrap().base_pointer;
+                    self.stack[bp] = receiver; // put the instance
+                }
+                ok
+            }
+            _ => {
+                self.runtime_error("Can only call functions, closures, and classes.");
+                false
+            }
         }
-        self.runtime_error("Can only call functions, closures, and classes.");
-        false
+    }
+
+    fn invoke(&mut self, name: &str, arg_count: usize) -> bool {
+        let receiver = *self.peek_stack(arg_count);
+        let Value::Obj(recv_obj) = receiver else { unreachable!() };
+        let ObjKind::ClassInstance { klass, fields } = &unsafe{ &*recv_obj }.kind else { 
+            self.runtime_error("only instances have methods.");
+            return false;
+        };
+        if let Some(value) = fields.get(name) {
+            let bp = self.stack.len() - arg_count as usize - 1;
+             self.stack[bp] = *value;
+             return self.call_value(*value, arg_count as u8);
+        }
+        self.invoke_from_class(*klass, name, arg_count)
+    }
+
+    fn invoke_from_class(&mut self, klass: *mut Obj, name: &str, arg_count: usize) -> bool {
+        let ObjKind::Class { methods, .. } = &unsafe { &*klass }.kind else { unreachable!() };
+        if let Some(closure) = methods.get(name)
+            && let Value::Obj(func_ptr) = closure {
+            self.call(*func_ptr, arg_count as u8)
+        } else {
+            self.runtime_error(&format!("Undefined property '{name}'"));
+            false
+        }
     }
 
     fn capture_upvalue(&mut self, slot: usize) -> *mut Obj {
@@ -568,6 +640,13 @@ impl Vm {
                     let arg_count = self.read_byte();
                     let callee = *self.peek_stack(arg_count as usize);
                     if !self.call_value(callee, arg_count) {
+                        return InterpretResult::RuntimeError;
+                    }
+                }
+                OpCode::Invoke => {
+                    let method = self.read_string_constant();
+                    let arg_count = self.read_byte() as usize;
+                    if !self.invoke(&method, arg_count) {
                         return InterpretResult::RuntimeError;
                     }
                 }
@@ -648,61 +727,50 @@ impl Vm {
                     self.stack[base + slot] = *self.peek_stack(0);
                 }
                 OpCode::DefineGlobal => {
-                    let name = self.read_constant();
-                    // SAFETY: the compiler always emits a string constant as the operand
-                    // for DefineGlobal/GetGlobal/SetGlobal; the pointer is live.
-                    let key = unsafe { name.as_string() }.unwrap().to_string();
-                    self.globals.insert(key, *self.peek_stack(0));
+                    let key = self.read_string_constant();
+                    self.globals.insert(key.to_string(), *self.peek_stack(0));
                     self.stack.pop();
                 }
                 OpCode::GetGlobal => {
-                    let name = self.read_constant();
-                    // SAFETY: same as DefineGlobal.
-                    let key = unsafe { name.as_string() }.unwrap();
+                    let key = self.read_string_constant();
                     if let Some(val) = self.globals.get(key) {
                         self.stack.push(*val);
                     } else {
-                        self.runtime_error(&format!("Undefined variable '{}'", name));
+                        self.runtime_error(&format!("Undefined variable '{}'", key));
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::SetGlobal => {
-                    let name = self.read_constant();
-                    // SAFETY: same as DefineGlobal.
-                    let key = unsafe { name.as_string() }.unwrap();
+                    let key = self.read_string_constant();
                     if self.globals.contains_key(key) {
                         self.globals.insert(key.to_string(), *self.peek_stack(0));
                     } else {
-                        self.runtime_error(&format!("Undefined variable '{}'", name));
+                        self.runtime_error(&format!("Undefined variable '{}'", key));
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::GetProperty => {
+                    let key = self.read_string_constant();
                     let instance = *self.peek_stack(0);
-                    let name = self.read_constant();
-                    // SAFETY: same as DefineGlobal.
-                    let key = unsafe { name.as_string() }.unwrap();
                     let Value::Obj(inst_ptr) = instance else {
-                        unreachable!()
+                        self.runtime_error("Only instances have properties.");
+                        return InterpretResult::RuntimeError;
                     };
-                    let ObjKind::ClassInstance { ref fields, .. } = unsafe { &*inst_ptr }.kind
+                    let ObjKind::ClassInstance { ref fields, klass } = unsafe { &*inst_ptr }.kind
                     else {
                         self.runtime_error("Only instances have properties.");
                         return InterpretResult::RuntimeError;
                     };
-                    if let Some(val) = fields.get(key) {
-                        self.stack.pop(); // instance
-                        self.stack.push(*val);
-                    } else {
-                        self.runtime_error(&format!("undefined property {key}"));
+                    if let Some(&val) = fields.get(key) {
+                        self.stack.pop();
+                        self.stack.push(val);
+                    } else if !self.bind_method(klass, &key) {
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::SetProperty => {
                     let instance = *self.peek_stack(1);
-                    let name = self.read_constant();
-                    // SAFETY: same as DefineGlobal.
-                    let key = unsafe { name.as_string() }.unwrap();
+                    let key = self.read_string_constant();
                     let Value::Obj(inst_ptr) = instance else {
                         unreachable!()
                     };
@@ -725,7 +793,7 @@ impl Vm {
                 OpCode::GetUpValue => {
                     let slot = self.read_byte() as usize;
                     let func_ptr = self.frames.last().unwrap().function;
-                    // sAFETY: frame.function is a live Closure; upvalues[slot] is a live upvalue.
+                    // SAFETY: frame.function is a live Closure; upvalues[slot] is a live upvalue.
                     let val = unsafe {
                         let ObjKind::Closure { upvalues, .. } = &(*func_ptr).kind else {
                             unreachable!()
@@ -846,8 +914,15 @@ impl Vm {
                     let ObjKind::String(name) = &(unsafe { &*ptr }.kind) else {
                         unreachable!()
                     };
-                    let ptr = self.alloc_obj(ObjKind::Class { name: name.clone() });
+                    let ptr = self.alloc_obj(ObjKind::Class {
+                        name: name.clone(),
+                        methods: HashMap::new(),
+                    });
                     self.stack.push(Value::Obj(ptr));
+                }
+                OpCode::Method => {
+                    let key = self.read_string_constant();
+                    self.define_method(&key);
                 }
             }
         }
@@ -933,6 +1008,50 @@ impl Vm {
                 true // keep in open_values
             }
         })
+    }
+
+    fn define_method(&mut self, method_name: &str) {
+        let method_val = self.peek_stack(0);
+        let klass_val = self.peek_stack(1);
+
+        let Value::Obj(method_ptr) = *method_val else {
+            unreachable!()
+        };
+        let Value::Obj(klass_ptr) = *klass_val else {
+            unreachable!()
+        };
+
+        if let ObjKind::Closure { .. } = unsafe { &(*method_ptr).kind }
+            && let ObjKind::Class { methods, .. } = unsafe { &mut (*klass_ptr).kind }
+        {
+            methods.insert(method_name.to_string(), *method_val);
+        } else {
+            self.runtime_error("method declarations must be functions");
+        }
+
+        self.stack.pop();
+    }
+
+    fn bind_method(&mut self, klass: *mut Obj, key: &str) -> bool {
+        let ObjKind::Class { methods, .. } = &unsafe { &*klass }.kind else {
+            unreachable!()
+        };
+        if let Some(method) = methods.get(key).copied() {
+            let receiver = *self.peek_stack(0);
+            let Value::Obj(method_ptr) = method else {
+                unreachable!()
+            };
+            let ptr = self.alloc_obj(ObjKind::BoundMethod {
+                receiver,
+                method: method_ptr,
+            });
+            let _ = self.stack.pop(); // pop the instance off the stack
+            self.stack.push(Value::Obj(ptr));
+            true
+        } else {
+            self.runtime_error(&format!("undefined property '{key}'."));
+            false
+        }
     }
 }
 

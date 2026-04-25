@@ -6,6 +6,9 @@ use crate::value::{Obj, ObjKind, Value};
 
 use anyhow::{Result, bail};
 
+
+struct ClassContext;
+
 struct CompilerContext {
     function: *mut Obj,          // ObjKind::Function with its own chunk
     function_kind: FunctionKind, // top-level or user-defined function
@@ -18,6 +21,8 @@ struct CompilerContext {
 enum FunctionKind {
     Script, // top-level execution
     Function,
+    Method,
+    Initializer,
 }
 
 #[repr(usize)]
@@ -81,6 +86,7 @@ pub struct Compiler<'a> {
     previous: Token,
 
     contexts: Vec<CompilerContext>,
+    class_contexts: Vec<ClassContext>,
 
     objects: &'a mut *mut Obj,
     strings: &'a mut HashMap<String, *mut Obj>,
@@ -118,6 +124,7 @@ impl<'a> Compiler<'a> {
                 line: 0,
             },
             contexts: Vec::new(),
+            class_contexts: Vec::new(),
             objects,
             strings,
 
@@ -154,7 +161,7 @@ impl<'a> Compiler<'a> {
     fn push_context(&mut self, kind: FunctionKind) {
         let name = match kind {
             FunctionKind::Script => String::new(),
-            FunctionKind::Function => self.previous.lexeme.clone(),
+            _ => self.previous.lexeme.clone(),
         };
         let func_obj = Box::into_raw(Box::new(Obj {
             kind: ObjKind::Function {
@@ -167,10 +174,14 @@ impl<'a> Compiler<'a> {
             marked: false,
         }));
         *self.objects = func_obj;
+        let dummy_name = match kind {
+            FunctionKind::Method | FunctionKind::Initializer => "this".to_string(),
+            _ => String::new(),
+        };
         let dummy = Local {
             name: Token {
                 kind: TokenKind::Nil,
-                lexeme: String::new(),
+                lexeme: dummy_name,
                 line: 0,
             },
             depth: Some(0),
@@ -306,7 +317,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_return(&mut self) {
-        self.emit_byte(OpCode::Nil as u8);
+        match self.contexts.last().unwrap().function_kind {
+            FunctionKind::Initializer => self.emit_bytes(OpCode::GetLocal as u8, 0),
+            _ => self.emit_byte(OpCode::Nil as u8),
+        }
         self.emit_byte(OpCode::Return as u8);
     }
 
@@ -601,6 +615,13 @@ impl<'a> Compiler<'a> {
             TokenKind::String => self.string(),
             TokenKind::Identifier => self.variable(can_assign),
             TokenKind::False | TokenKind::True | TokenKind::Nil => self.literal(),
+            TokenKind::This => {
+                if self.class_contexts.is_empty() {
+                    self.error("Can't use `this` outside of a class.");
+                    return;
+                }
+                self.this_expr()
+            },
             _ => self.error("Expect expression"),
         }
     }
@@ -709,14 +730,36 @@ impl<'a> Compiler<'a> {
 
     fn class_declaration(&mut self) {
         self.consume(TokenKind::Identifier, "expect a class name.");
+        let class_name = self.previous.clone();
         let name_constant = self.identifier_constant(self.previous.clone());
         self.declare_variable();
 
         self.emit_bytes(OpCode::Class as u8, name_constant);
         self.define_variable(name_constant);
 
+        self.named_variable(class_name, false);
         self.consume(TokenKind::LeftBrace, "Expect '{' before class body.");
+        self.class_contexts.push(ClassContext{});
+        while self.current.kind != TokenKind::RightBrace && self.current.kind != TokenKind::Eof {
+            self.method();
+        }
+        let _ = self.class_contexts.pop();
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.");
+        self.emit_byte(OpCode::Pop as u8); // pop the class name off the vm stack
+        
+    }
+
+    fn method(&mut self) {
+        self.consume(TokenKind::Identifier, "expect method name");
+        let constant = self.identifier_constant(self.previous.clone());
+
+        let func_kind = match self.previous.lexeme.as_str() {
+            "init" => FunctionKind::Initializer,
+            _ => FunctionKind::Method,
+        };
+        self.function(func_kind);
+
+        self.emit_bytes(OpCode::Method as u8, constant);
     }
 
     // --- statements ---
@@ -773,6 +816,9 @@ impl<'a> Compiler<'a> {
         if self.peek_match(TokenKind::Semicolon) {
             self.emit_return();
         } else {
+            if self.contexts.last().unwrap().function_kind == FunctionKind::Initializer {
+                self.error("can't return a value from an initializer.");
+            }
             self.expression();
             self.consume(TokenKind::Semicolon, "Expect ';' after return value.");
             self.emit_byte(OpCode::Return as u8);
@@ -895,6 +941,10 @@ impl<'a> Compiler<'a> {
         self.named_variable(self.previous.clone(), can_assign)
     }
 
+    fn this_expr(&mut self) {
+        self.variable(false);
+    }
+
     fn named_variable(&mut self, name: Token, can_assign: bool) {
         let (get_op, set_op, arg) = if let Some(slot) = self.resolve_local(&name) {
             (OpCode::GetLocal as u8, OpCode::SetLocal as u8, slot)
@@ -973,6 +1023,10 @@ impl<'a> Compiler<'a> {
         if can_assign && self.peek_match(TokenKind::Equal) {
             self.expression();
             self.emit_bytes(OpCode::SetProperty as u8, name);
+        } else if self.peek_match(TokenKind::LeftParen) {
+            let arg_count = self.argument_list();
+            self.emit_bytes(OpCode::Invoke as u8, name);
+            self.emit_byte(arg_count);
         } else {
             self.emit_bytes(OpCode::GetProperty as u8, name);
         }

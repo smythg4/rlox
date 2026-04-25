@@ -49,10 +49,15 @@ pub enum ObjKind {
     },
     Class {
         name: String,
+        methods: HashMap<String, Value>,
     },
     ClassInstance {
         klass: *mut Obj,
         fields: HashMap<String, Value>,
+    },
+    BoundMethod {
+        receiver: Value,
+        method: *mut Obj,
     },
 }
 
@@ -67,11 +72,18 @@ impl ObjKind {
             }
             ObjKind::Closure { upvalues, .. } => upvalues.capacity() * size_of::<*mut Obj>(),
             ObjKind::UpValue { .. } => 0,
-            ObjKind::Class { name } => name.capacity(),
+            ObjKind::Class { name, methods } => {
+                name.capacity()
+                    + methods
+                        .keys()
+                        .map(|key| key.capacity() + size_of::<Value>())
+                        .sum::<usize>()
+            }
             ObjKind::ClassInstance { fields, .. } => fields
                 .keys()
                 .map(|key| key.capacity() + size_of::<Value>())
                 .sum(),
+            ObjKind::BoundMethod { .. } => size_of::<Value>(),
         }
     }
 }
@@ -110,10 +122,11 @@ impl std::fmt::Display for Value {
                         write!(f, "<closure {name}>")
                     }
                     ObjKind::UpValue { .. } => write!(f, "upvalue"),
-                    ObjKind::Class { name } => write!(f, "{name}"),
+                    ObjKind::Class { name, .. } => write!(f, "{name}"),
                     ObjKind::ClassInstance { klass, .. } => {
                         write!(f, "{} instance", Value::Obj(*klass))
                     }
+                    ObjKind::BoundMethod { method, .. } => write!(f, "{}", Value::Obj(*method)),
                 }
             }
             Value::Nil => write!(f, "nil"),
