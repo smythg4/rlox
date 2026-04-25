@@ -141,10 +141,6 @@ rlox
 - The intern table is `HashMap<String, *mut Obj>`, so lookups hash the string content. Nystrom's intern table uses pointer equality once interned — a lookup only needs to hash once on insertion, and subsequent identity comparisons are O(1) pointer compares.
 - `read_string_constant` uses `unsafe { std::mem::transmute }` to extend the lifetime of a `&str` borrow out of the GC heap, breaking the borrow checker's tie to `&mut self`. Nystrom returns a raw C string with no lifetime to manage.
 
-**Missing opcode**
-
-- None. `SuperInvoke` is implemented, fusing `GetSuper` + `Call` for `super.method()` calls the same way `Invoke` fuses `GetProperty` + `Call` for regular dispatch.
-
 ## Optimization opportunities
 
 - **IP caching** — `read_byte()` walks `frames.last() → resolve_function() → chunk.codes[ip]` on every instruction. Caching `ip`, `base_pointer`, and a raw `*const u8` slice pointer as locals in `run()` eliminates that chain. In Nystrom's C, the `ip` raw pointer is register-allocated by the compiler.
