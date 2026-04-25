@@ -767,15 +767,18 @@ impl<'a> Compiler<'a> {
         while self.current.kind != TokenKind::RightBrace && self.current.kind != TokenKind::Eof {
             self.method();
         }
-        let _ = self.class_contexts.pop();
 
-        if let Some(class_context) = self.class_contexts.last()
-            && class_context.has_super_class
-        {
-            self.end_scope();
-        }
+        let had_super = self
+            .class_contexts
+            .last()
+            .map(|cc| cc.has_super_class)
+            .unwrap_or(false);
+        let _ = self.class_contexts.pop();
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.");
-        self.emit_byte(OpCode::Pop as u8); // pop the class name off the vm stack
+        self.emit_byte(OpCode::Pop as u8); // class gone first
+        if had_super {
+            self.end_scope(); // now super is on top, CloseUpvalue works
+        }
     }
 
     fn method(&mut self) {

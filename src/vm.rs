@@ -667,7 +667,9 @@ impl Vm {
                     let method = self.read_string_constant();
                     let arg_count = self.read_byte() as usize;
                     let super_val = self.stack.pop().unwrap();
-                    let Value::Obj(super_ptr) = super_val else { unreachable!() };
+                    let Value::Obj(super_ptr) = super_val else {
+                        unreachable!()
+                    };
                     if !self.invoke_from_class(super_ptr, method, arg_count) {
                         return InterpretResult::RuntimeError;
                     }
