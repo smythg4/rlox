@@ -17,6 +17,7 @@ pub enum OpCode {
     SetUpValue,
     SetProperty,
     GetProperty,
+    GetSuper,
     Equal,
     Greater,
     Less,
@@ -32,10 +33,12 @@ pub enum OpCode {
     Loop,
     Call,
     Invoke,
+    SuperInvoke,
     Closure,
     CloseUpvalue,
     Return,
     Class,
+    Inherit,
     Method,
 }
 
@@ -95,7 +98,8 @@ impl Chunk {
             | OpCode::GetProperty
             | OpCode::SetProperty
             | OpCode::Class
-            | OpCode::Method => offset + self.constant_instruction(offset),
+            | OpCode::Method
+            | OpCode::GetSuper => offset + self.constant_instruction(offset),
             OpCode::Return
             | OpCode::False
             | OpCode::True
@@ -111,7 +115,8 @@ impl Chunk {
             | OpCode::Multiply
             | OpCode::Subtract
             | OpCode::Add
-            | OpCode::CloseUpvalue => offset + self.simple_instruction(offset),
+            | OpCode::CloseUpvalue
+            | OpCode::Inherit => offset + self.simple_instruction(offset),
             OpCode::GetLocal
             | OpCode::SetLocal
             | OpCode::Call
@@ -119,7 +124,7 @@ impl Chunk {
             | OpCode::SetUpValue => offset + self.byte_instruction(offset),
             OpCode::Jump | OpCode::JumpIfFalse => offset + self.jump_instruction(1, offset),
             OpCode::Loop => offset + self.jump_instruction(-1, offset),
-            OpCode::Invoke => offset + self.invoke_instruction(offset),
+            OpCode::Invoke | OpCode::SuperInvoke => offset + self.invoke_instruction(offset),
             OpCode::Closure => {
                 let const_idx = self.codes[offset + 1] as usize;
                 print!("{:<16} {} ", op_code, const_idx);
@@ -202,9 +207,12 @@ impl Chunk {
 
     fn invoke_instruction(&self, offset: usize) -> usize {
         let op_code = OpCode::from(self.codes[offset]);
-        let const_idx = self.codes[offset+1] as usize;
-        let arg_count = self.codes[offset+2];
-        println!("{:<16} ({} args) {:04} '{}'", op_code, arg_count, const_idx, self.constants[const_idx]);
+        let const_idx = self.codes[offset + 1] as usize;
+        let arg_count = self.codes[offset + 2];
+        println!(
+            "{:<16} ({} args) {:04} '{}'",
+            op_code, arg_count, const_idx, self.constants[const_idx]
+        );
         3
     }
 }

@@ -6,8 +6,10 @@ use crate::value::{Obj, ObjKind, Value};
 
 use anyhow::{Result, bail};
 
-
-struct ClassContext;
+#[derive(Default)]
+struct ClassContext {
+    has_super_class: bool,
+}
 
 struct CompilerContext {
     function: *mut Obj,          // ObjKind::Function with its own chunk
@@ -38,7 +40,7 @@ enum Precedence {
     Factor,
     Unary,
     Call,
-    Primary,
+    //Primary, // I wasn't using this...
 }
 
 impl std::ops::Add<usize> for Precedence {
@@ -621,7 +623,8 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 self.this_expr()
-            },
+            }
+            TokenKind::Super => self.super_expr(),
             _ => self.error("Expect expression"),
         }
     }
@@ -737,16 +740,42 @@ impl<'a> Compiler<'a> {
         self.emit_bytes(OpCode::Class as u8, name_constant);
         self.define_variable(name_constant);
 
+        self.class_contexts.push(ClassContext::default());
+        // check for inheritance - do this before setting methods up
+        if self.peek_match(TokenKind::Less) {
+            self.consume(TokenKind::Identifier, "expect superclass name");
+            self.variable(false);
+
+            // make sure it's not self-inheritance
+            if Self::identifiers_equal(&class_name, &self.previous) {
+                self.error("a class can't inherit from itself.");
+            }
+
+            self.begin_scope();
+            self.add_local(synthetic_token("super"));
+            self.define_variable(0);
+
+            self.named_variable(class_name.clone(), false);
+            self.emit_byte(OpCode::Inherit as u8);
+            // mark this as having a super class
+            self.class_contexts.last_mut().unwrap().has_super_class = true;
+        }
+
         self.named_variable(class_name, false);
         self.consume(TokenKind::LeftBrace, "Expect '{' before class body.");
-        self.class_contexts.push(ClassContext{});
+
         while self.current.kind != TokenKind::RightBrace && self.current.kind != TokenKind::Eof {
             self.method();
         }
         let _ = self.class_contexts.pop();
+
+        if let Some(class_context) = self.class_contexts.last()
+            && class_context.has_super_class
+        {
+            self.end_scope();
+        }
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.");
         self.emit_byte(OpCode::Pop as u8); // pop the class name off the vm stack
-        
     }
 
     fn method(&mut self) {
@@ -945,6 +974,36 @@ impl<'a> Compiler<'a> {
         self.variable(false);
     }
 
+    fn super_expr(&mut self) {
+        if self.class_contexts.is_empty() {
+            self.error("Can't use 'super' outside of a class.");
+        } else if let Some(class_context) = self.class_contexts.last()
+            && !class_context.has_super_class
+        {
+            self.error("Can't use 'super' in a class with no superclass.");
+        }
+
+        self.consume(TokenKind::Dot, "Expect a '.' after 'super'.");
+        self.consume(TokenKind::Identifier, "Expect a superclass method name");
+        let name = self.identifier_constant(self.previous.clone());
+
+        // load the instance on the vm stack
+        self.named_variable(synthetic_token("this"), false);
+        // check if this is an immediate method call
+        if self.peek_match(TokenKind::LeftParen) {
+            let arg_count = self.argument_list();
+            self.named_variable(synthetic_token("super"), false);
+            // this will combine behavior of GetSuper and Call to save an allocation
+            self.emit_bytes(OpCode::SuperInvoke as u8, name);
+            self.emit_byte(arg_count);
+        } else {
+            // load the super class where the method is resolved on the stack
+            self.named_variable(synthetic_token("super"), false);
+            // encode the name of the method to access as an operand
+            self.emit_bytes(OpCode::GetSuper as u8, name);
+        }
+    }
+
     fn named_variable(&mut self, name: Token, can_assign: bool) {
         let (get_op, set_op, arg) = if let Some(slot) = self.resolve_local(&name) {
             (OpCode::GetLocal as u8, OpCode::SetLocal as u8, slot)
@@ -1053,5 +1112,13 @@ impl<'a> Compiler<'a> {
         }
         self.consume(TokenKind::RightParen, "Expect ')' after arguments.");
         count
+    }
+}
+
+fn synthetic_token(name: &str) -> Token {
+    Token {
+        kind: TokenKind::Nil,
+        lexeme: name.to_string(),
+        line: 0,
     }
 }

@@ -47,6 +47,9 @@ pub enum ObjKind {
         location: *mut Value,
         closed: Value,
     },
+    // TODO: Consider changing HashMaps to be keyed on *mut Obj instead of String
+    // saves string allocations and sticks to pointer equivalence for comparison
+    // will need to thread key *mut Obj into the GC too.
     Class {
         name: String,
         methods: HashMap<String, Value>,

@@ -1,0 +1,257 @@
+// ── 1. Literals and arithmetic ─────────────────────────────────────────────
+print 1 + 2;          // 3
+print 10 / 4;         // 2.5
+print 2 * 3 - 1;      // 5
+print -5 + 8;         // 3
+
+// ── 2. String concatenation ────────────────────────────────────────────────
+var greeting = "Hello, " + "world!";
+print greeting;
+
+// ── 3. Boolean logic and equality ─────────────────────────────────────────
+print true and false;   // false
+print false or true;    // true
+print !false;           // true
+print 1 == 1;           // true
+print 1 != 2;           // true
+print nil == nil;       // true
+print nil == false;     // false
+
+// ── 4. Variables (global and local) ───────────────────────────────────────
+var x = 10;
+{
+    var x = 20;         // shadows outer
+    print x;            // 20
+}
+print x;                // 10
+
+// ── 5. Control flow ───────────────────────────────────────────────────────
+if (x > 5) {
+    print "x is big";
+} else {
+    print "x is small";
+}
+
+var i = 0;
+while (i < 3) {
+    print i;
+    i = i + 1;
+}
+
+for (var j = 0; j < 3; j = j + 1) {
+    print j;
+}
+
+// ── 6. Functions ──────────────────────────────────────────────────────────
+fun square(n) {
+    return n * n;
+}
+print square(7);        // 49
+
+fun greet(name) {
+    print "Hi, " + name + "!";
+}
+greet("Lox");
+
+// ── 7. Recursion ──────────────────────────────────────────────────────────
+fun fib(n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+print fib(10);          // 55
+
+// ── 8. Closures and upvalues ──────────────────────────────────────────────
+fun make_adder(x) {
+    fun add(y) { return x + y; }
+    return add;
+}
+var add5 = make_adder(5);
+print add5(3);          // 8
+print add5(10);         // 15
+
+fun make_counter() {
+    var count = 0;
+    fun increment() {
+        count = count + 1;
+        return count;
+    }
+    return increment;
+}
+var counter = make_counter();
+print counter();        // 1
+print counter();        // 2
+print counter();        // 3
+
+// shared upvalue: two closures over the same variable
+fun shared_upvalue() {
+    var n = 0;
+    fun inc() { n = n + 1; }
+    fun get() { return n; }
+    inc(); inc();
+    return get();
+}
+print shared_upvalue(); // 2
+
+// ── 9. Native functions ───────────────────────────────────────────────────
+var t = clock();
+print t > 0;            // true
+print sqrt(9);          // 3
+print sqrt(2);          // 1.4142135623730951
+
+// ── 10. Classes and instances ─────────────────────────────────────────────
+class Point {
+    init(x, y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    print_coords() {
+        print this.x;
+        print this.y;
+    }
+
+    distance_from_origin() {
+        return sqrt(this.x * this.x + this.y * this.y);
+    }
+}
+
+var p = Point(3, 4);
+p.print_coords();                 // 3 / 4
+print p.distance_from_origin();  // 5
+
+// dynamic field assignment
+p.z = 0;
+print p.z;              // 0
+
+// ── 11. this in methods ───────────────────────────────────────────────────
+class Counter {
+    init(start) {
+        this.value = start;
+    }
+
+    increment() {
+        this.value = this.value + 1;
+    }
+
+    get() {
+        return this.value;
+    }
+}
+
+var c = Counter(10);
+c.increment();
+c.increment();
+print c.get();          // 12
+
+// ── 12. Methods stored as values (bound methods) ──────────────────────────
+var bound = c.increment;
+bound();
+print c.get();          // 13
+
+// ── 13. Initializer returns this ──────────────────────────────────────────
+class Builder {
+    init() {
+        this.steps = 0;
+    }
+
+    step() {
+        this.steps = this.steps + 1;
+        return this;
+    }
+}
+
+var b = Builder();
+b.step();
+b.step();
+b.step();
+print b.steps;          // 3
+
+// ── 14. Inheritance ───────────────────────────────────────────────────────
+class Animal {
+    init(name) {
+        this.name = name;
+    }
+
+    speak() {
+        print this.name + " makes a sound.";
+    }
+
+    describe() {
+        print "I am " + this.name + ".";
+    }
+}
+
+class Dog < Animal {
+    speak() {
+        print this.name + " barks.";
+    }
+}
+
+var a = Animal("Cat");
+a.speak();              // Cat makes a sound.
+a.describe();           // I am Cat.
+
+var d = Dog("Rex");
+d.speak();              // Rex barks.
+d.describe();           // I am Rex.  (inherited)
+
+// ── 15. super ─────────────────────────────────────────────────────────────
+class Doughnut {
+    cook() {
+        print "Dunk in the fryer.";
+        this.finish("sprinkles");
+    }
+
+    finish(ingredient) {
+        print "Finish with " + ingredient + ".";
+    }
+}
+
+class Cruller < Doughnut {
+    finish(ingredient) {
+        super.finish("icing");
+    }
+}
+
+var plain = Doughnut();
+plain.cook();
+// Dunk in the fryer.
+// Finish with sprinkles.
+
+var cruller = Cruller();
+cruller.cook();
+// Dunk in the fryer.
+// Finish with icing.
+
+// ── 16. Multi-level inheritance ───────────────────────────────────────────
+class Shape {
+    init(color) {
+        this.color = color;
+    }
+
+    describe() {
+        print "A " + this.color + " shape.";
+    }
+}
+
+class Rectangle < Shape {
+    init(color, w, h) {
+        super.init(color);
+        this.w = w;
+        this.h = h;
+    }
+
+    area() {
+        return this.w * this.h;
+    }
+}
+
+class Square < Rectangle {
+    init(color, side) {
+        super.init(color, side, side);
+    }
+}
+
+var sq = Square("red", 4);
+sq.describe();          // A red shape.
+print sq.area();        // 16

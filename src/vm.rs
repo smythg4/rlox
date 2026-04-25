@@ -28,6 +28,9 @@ pub struct Vm {
     frames: Vec<CallFrame>,
 
     objects: *mut Obj,
+    // TODO: Consider changing HashMaps to be keyed on *mut Obj instead of String
+    // saves string allocations and sticks to pointer equivalence for comparison
+    // will need to thread key *mut Obj into the GC too.
     strings: HashMap<String, *mut Obj>,
     globals: HashMap<String, Value>,
     // consider adding
@@ -71,7 +74,7 @@ impl Vm {
             toggle_gc_log: false,
 
             bytes_allocated: 0,
-            next_gc: 1024*1024,
+            next_gc: 1024 * 1024,
             grey_stack: Vec::new(),
         };
 
@@ -453,11 +456,11 @@ impl Vm {
     }
 
     fn read_string_constant<'a>(&mut self) -> &'a str {
-      let name = self.read_constant();
-      // SAFETY: name is a Value::Obj pointing to an interned ObjKind::String in the
-      // GC heap. String constants in the chunk are always reachable roots, so this
-      // Obj won't be freed for the duration of this borrow.
-      unsafe { std::mem::transmute(name.as_string().unwrap()) }
+        let name = self.read_constant();
+        // SAFETY: name is a Value::Obj pointing to an interned ObjKind::String in the
+        // GC heap. String constants in the chunk are always reachable roots, so this
+        // Obj won't be freed for the duration of this borrow.
+        unsafe { std::mem::transmute(name.as_string().unwrap()) }
     }
 }
 
@@ -532,11 +535,15 @@ impl Vm {
                 });
                 let slot = self.stack.len() - arg_count as usize - 1;
                 self.stack[slot] = Value::Obj(instance);
-                if let ObjKind::Class { methods, .. } = unsafe { &(*ptr).kind } && let Some(init_val) = methods.get("init") {
-                    let Value::Obj(init_ptr) = *init_val else { unreachable!() };
+                if let ObjKind::Class { methods, .. } = unsafe { &(*ptr).kind }
+                    && let Some(init_val) = methods.get("init")
+                {
+                    let Value::Obj(init_ptr) = *init_val else {
+                        unreachable!()
+                    };
                     return self.call(init_ptr, arg_count);
                 } else if arg_count > 0 {
-                    self.runtime_error("Expected 0 arguments but got {arg_count}.");
+                    self.runtime_error(&format!("Expected 0 arguments but got {arg_count}."));
                     return false;
                 }
                 true
@@ -560,23 +567,28 @@ impl Vm {
 
     fn invoke(&mut self, name: &str, arg_count: usize) -> bool {
         let receiver = *self.peek_stack(arg_count);
-        let Value::Obj(recv_obj) = receiver else { unreachable!() };
-        let ObjKind::ClassInstance { klass, fields } = &unsafe{ &*recv_obj }.kind else { 
+        let Value::Obj(recv_obj) = receiver else {
+            unreachable!()
+        };
+        let ObjKind::ClassInstance { klass, fields } = &unsafe { &*recv_obj }.kind else {
             self.runtime_error("only instances have methods.");
             return false;
         };
         if let Some(value) = fields.get(name) {
-            let bp = self.stack.len() - arg_count as usize - 1;
-             self.stack[bp] = *value;
-             return self.call_value(*value, arg_count as u8);
+            let bp = self.stack.len() - arg_count - 1;
+            self.stack[bp] = *value;
+            return self.call_value(*value, arg_count as u8);
         }
         self.invoke_from_class(*klass, name, arg_count)
     }
 
     fn invoke_from_class(&mut self, klass: *mut Obj, name: &str, arg_count: usize) -> bool {
-        let ObjKind::Class { methods, .. } = &unsafe { &*klass }.kind else { unreachable!() };
+        let ObjKind::Class { methods, .. } = &unsafe { &*klass }.kind else {
+            unreachable!()
+        };
         if let Some(closure) = methods.get(name)
-            && let Value::Obj(func_ptr) = closure {
+            && let Value::Obj(func_ptr) = closure
+        {
             self.call(*func_ptr, arg_count as u8)
         } else {
             self.runtime_error(&format!("Undefined property '{name}'"));
@@ -613,6 +625,7 @@ impl Vm {
 
 impl Vm {
     pub fn run(&mut self) -> InterpretResult {
+        // TODO: Cache hot state as locals — avoids frame chain walk per instruction
         loop {
             if self.toggle_tracing {
                 print!("      ");
@@ -646,7 +659,16 @@ impl Vm {
                 OpCode::Invoke => {
                     let method = self.read_string_constant();
                     let arg_count = self.read_byte() as usize;
-                    if !self.invoke(&method, arg_count) {
+                    if !self.invoke(method, arg_count) {
+                        return InterpretResult::RuntimeError;
+                    }
+                }
+                OpCode::SuperInvoke => {
+                    let method = self.read_string_constant();
+                    let arg_count = self.read_byte() as usize;
+                    let super_val = self.stack.pop().unwrap();
+                    let Value::Obj(super_ptr) = super_val else { unreachable!() };
+                    if !self.invoke_from_class(super_ptr, method, arg_count) {
                         return InterpretResult::RuntimeError;
                     }
                 }
@@ -764,7 +786,7 @@ impl Vm {
                     if let Some(&val) = fields.get(key) {
                         self.stack.pop();
                         self.stack.push(val);
-                    } else if !self.bind_method(klass, &key) {
+                    } else if !self.bind_method(klass, key) {
                         return InterpretResult::RuntimeError;
                     }
                 }
@@ -821,6 +843,21 @@ impl Vm {
                         };
                         **location = val;
                     };
+                }
+                OpCode::GetSuper => {
+                    let name = self.read_string_constant();
+                    let super_val = self.stack.pop().unwrap();
+                    let Value::Obj(super_ptr) = super_val else {
+                        unreachable!()
+                    };
+                    assert!(matches!(
+                        &unsafe { &*super_ptr }.kind,
+                        ObjKind::Class { .. }
+                    ));
+                    // using bind_method with the super class as opposed to the instance's class
+                    if !self.bind_method(super_ptr, name) {
+                        return InterpretResult::RuntimeError;
+                    }
                 }
                 OpCode::Greater => {
                     let y = self.stack.pop().unwrap();
@@ -922,7 +959,34 @@ impl Vm {
                 }
                 OpCode::Method => {
                     let key = self.read_string_constant();
-                    self.define_method(&key);
+                    self.define_method(key);
+                }
+                OpCode::Inherit => {
+                    let super_class = *self.peek_stack(1);
+                    let sub_class = *self.peek_stack(0);
+                    let Value::Obj(super_ptr) = super_class else {
+                        self.runtime_error("Superclass must be a class.");
+                        return InterpretResult::RuntimeError;
+                    };
+                    let Value::Obj(sub_ptr) = sub_class else {
+                        unreachable!()
+                    };
+                    let ObjKind::Class {
+                        methods: super_methods,
+                        ..
+                    } = &unsafe { &*super_ptr }.kind
+                    else {
+                        unreachable!()
+                    };
+                    let ObjKind::Class {
+                        methods: sub_methods,
+                        ..
+                    } = &mut unsafe { &mut *sub_ptr }.kind
+                    else {
+                        unreachable!()
+                    };
+                    sub_methods.extend(super_methods.iter().map(|(k, v)| (k.clone(), *v)));
+                    let _ = self.stack.pop(); // pops the subclass off the vm stack
                 }
             }
         }
