@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::mem::MaybeUninit;
+use std::ops::{Index, IndexMut, RangeFrom};
 
 use crate::chunk::{Chunk, OpCode};
 use crate::compiler::Compiler;
@@ -23,8 +25,76 @@ struct CallFrame {
     base_pointer: usize, // index into vm.stack where this frame's locals start
 }
 
+#[derive(Debug)]
+  struct Stack {
+      data: Box<[MaybeUninit<Value>; STACK_MAX]>,
+      top: usize,
+  }
+  impl Default for Stack {
+      fn default() -> Self {
+          Stack {
+              data: Box::new([MaybeUninit::uninit(); STACK_MAX]),
+              top: 0,
+          }
+      }
+  }
+impl Stack {
+    pub fn push(&mut self, val: Value) {
+        self.data[self.top].write(val);
+        self.top += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<Value> {
+        if self.top == 0 {
+            return None;
+        }
+        self.top -= 1;
+        Some(unsafe { self.data[self.top].assume_init() })
+    }
+
+    pub fn clear(&mut self) {
+        self.top = 0;
+    }
+
+    pub fn truncate(&mut self, index: usize) {
+        self.top = index;
+    }
+
+  pub fn iter(&self) -> impl Iterator<Item = &Value> {
+      let initialized = &self.data[..self.top];
+      // SAFETY: all slots below top have been written by push
+      unsafe { &*(initialized as *const [MaybeUninit<Value>] as *const [Value]) }.iter()
+  }
+
+  pub fn len(&self) -> usize {
+    self.top
+  }
+}
+
+  impl Index<usize> for Stack {
+      type Output = Value;
+      fn index(&self, i: usize) -> &Value {
+          unsafe { self.data[i].assume_init_ref() }
+      }
+  }
+
+  impl IndexMut<usize> for Stack {
+      fn index_mut(&mut self, i: usize) -> &mut Value {
+          unsafe { self.data[i].assume_init_mut() }
+      }
+  }
+
+    impl Index<RangeFrom<usize>> for Stack {
+      type Output = [Value];
+      fn index(&self, r: RangeFrom<usize>) -> &[Value] {
+          let initialized = &self.data[r.start..self.top];
+          unsafe { &*(initialized as *const [MaybeUninit<Value>] as *const [Value]) }
+      }
+  }
+
 pub struct Vm {
-    stack: Vec<Value>,
+    //stack: Vec<Value>,
+    stack: Stack,
     frames: Vec<CallFrame>,
 
     objects: *mut Obj,
@@ -60,7 +130,7 @@ impl Default for Vm {
 impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
-            stack: Vec::with_capacity(STACK_MAX),
+            stack: Stack::default(),//Vec::with_capacity(STACK_MAX),
             frames: Vec::with_capacity(FRAMES_MAX),
 
             objects: std::ptr::null_mut(),

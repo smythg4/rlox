@@ -1,0 +1,44 @@
+// Benchmark: method dispatch, field access, and recursive calls
+// Modeled after the benchmarks in Nystrom's test suite
+
+fun fib(n) {
+    if (n < 2) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
+class Counter {
+    init() { this.value = 0; }
+    increment() { this.value = this.value + 1; }
+    get() { return this.value; }
+}
+
+class Tree {
+    init(depth) {
+        this.depth = depth;
+        if (depth > 0) {
+            this.left  = Tree(depth - 1);
+            this.right = Tree(depth - 1);
+        }
+    }
+
+    count() {
+        if (this.depth == 0) return 1;
+        return 1 + this.left.count() + this.right.count();
+    }
+}
+
+// --- fib: pure recursion ---
+print fib(35);
+
+// --- counter: tight method dispatch loop ---
+var c = Counter();
+var i = 0;
+while (i < 1000000) {
+    c.increment();
+    i = i + 1;
+}
+print c.get();
+
+// --- tree: allocation + recursive method dispatch ---
+var t = Tree(14);
+print t.count();
