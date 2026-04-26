@@ -1,0 +1,26 @@
+Benchmark 1: ./target/release/rlox bench.lox
+  Time (mean ± σ):      2.973 s ±  0.025 s    [User: 2.962 s, System: 0.010 s]
+  Range (min … max):    2.944 s …  3.050 s    25 runs
+
+smith@MacBookPro rlox % /usr/bin/time -l target/release/rlox bench.lox 2>&1
+9227465
+1000000
+32767
+        3.02 real         3.01 user         0.00 sys
+            13647872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 984  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  16  involuntary context switches
+         44607823897  instructions retired
+          9454407047  cycles elapsed
+            12731136  peak memory footprint

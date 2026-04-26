@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::vecmap::VecMap;
 
 use crate::chunk::{Chunk, OpCode};
 use crate::lexer::{Lexer, Token, TokenKind};
@@ -91,7 +91,7 @@ pub struct Compiler<'a> {
     class_contexts: Vec<ClassContext>,
 
     objects: &'a mut *mut Obj,
-    strings: &'a mut HashMap<String, *mut Obj>,
+    strings: &'a mut VecMap<String, *mut Obj>,
 
     had_error: bool,
     panic_mode: bool,
@@ -111,7 +111,7 @@ impl<'a> Compiler<'a> {
     pub fn new(
         lexer: Lexer<'a>,
         objects: &'a mut *mut Obj,
-        strings: &'a mut HashMap<String, *mut Obj>,
+        strings: &'a mut VecMap<String, *mut Obj>,
     ) -> Self {
         let mut c = Compiler {
             lexer,
@@ -488,7 +488,7 @@ impl<'a> Compiler<'a> {
 
     fn identifier_constant(&mut self, token: Token) -> u8 {
         let ptr = self.intern_string(token.lexeme);
-        self.make_constant(Value::Obj(ptr))
+        self.make_constant(Value::from_obj(ptr))
     }
 
     fn intern_string(&mut self, s: String) -> *mut Obj {
@@ -719,7 +719,7 @@ impl<'a> Compiler<'a> {
 
         let upvalues = std::mem::take(&mut self.contexts.last_mut().unwrap().upvalues);
         let function = self.end_compiler();
-        let constant = self.make_constant(Value::Obj(function));
+        let constant = self.make_constant(Value::from_obj(function));
         self.emit_bytes(OpCode::Closure as u8, constant);
 
         let ObjKind::Function { upvalue_count, .. } = unsafe { &*function }.kind else {
@@ -954,7 +954,7 @@ impl<'a> Compiler<'a> {
 
     fn number(&mut self) {
         if let Ok(value) = self.previous.lexeme.parse::<f64>() {
-            self.emit_constant(Value::Number(value));
+            self.emit_constant(Value::from_number(value));
         } else {
             self.error(&format!(
                 "invalid number literal '{}'",
@@ -966,7 +966,7 @@ impl<'a> Compiler<'a> {
     fn string(&mut self) {
         let stripped = self.previous.lexeme.trim_matches('"').to_string();
         let ptr = self.intern_string(stripped);
-        self.emit_constant(Value::Obj(ptr));
+        self.emit_constant(Value::from_obj(ptr));
     }
 
     fn variable(&mut self, can_assign: bool) {

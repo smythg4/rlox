@@ -132,7 +132,8 @@ impl Chunk {
 
                 // SAFETY: the complier always places an ObjKind::Function as the Closure
                 // constant operand; the pointer is live for the VM's lifetime
-                let upvalue_count = if let Value::Obj(ptr) = self.constants[const_idx] {
+                let upvalue_count = if self.constants[const_idx].is_obj() {
+                    let ptr = self.constants[const_idx].as_obj();
                     unsafe {
                         if let ObjKind::Function { upvalue_count, .. } = &(*ptr).kind {
                             *upvalue_count

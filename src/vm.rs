@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::mem::MaybeUninit;
-use std::ops::{Index, IndexMut, RangeFrom};
+use crate::vecmap::VecMap;
 
 use crate::chunk::{Chunk, OpCode};
 use crate::compiler::Compiler;
@@ -25,84 +23,14 @@ struct CallFrame {
     base_pointer: usize, // index into vm.stack where this frame's locals start
 }
 
-#[derive(Debug)]
-  struct Stack {
-      data: Box<[MaybeUninit<Value>; STACK_MAX]>,
-      top: usize,
-  }
-  impl Default for Stack {
-      fn default() -> Self {
-          Stack {
-              data: Box::new([MaybeUninit::uninit(); STACK_MAX]),
-              top: 0,
-          }
-      }
-  }
-impl Stack {
-    pub fn push(&mut self, val: Value) {
-        self.data[self.top].write(val);
-        self.top += 1;
-    }
-
-    pub fn pop(&mut self) -> Option<Value> {
-        if self.top == 0 {
-            return None;
-        }
-        self.top -= 1;
-        Some(unsafe { self.data[self.top].assume_init() })
-    }
-
-    pub fn clear(&mut self) {
-        self.top = 0;
-    }
-
-    pub fn truncate(&mut self, index: usize) {
-        self.top = index;
-    }
-
-  pub fn iter(&self) -> impl Iterator<Item = &Value> {
-      let initialized = &self.data[..self.top];
-      // SAFETY: all slots below top have been written by push
-      unsafe { &*(initialized as *const [MaybeUninit<Value>] as *const [Value]) }.iter()
-  }
-
-  pub fn len(&self) -> usize {
-    self.top
-  }
-}
-
-  impl Index<usize> for Stack {
-      type Output = Value;
-      fn index(&self, i: usize) -> &Value {
-          unsafe { self.data[i].assume_init_ref() }
-      }
-  }
-
-  impl IndexMut<usize> for Stack {
-      fn index_mut(&mut self, i: usize) -> &mut Value {
-          unsafe { self.data[i].assume_init_mut() }
-      }
-  }
-
-    impl Index<RangeFrom<usize>> for Stack {
-      type Output = [Value];
-      fn index(&self, r: RangeFrom<usize>) -> &[Value] {
-          let initialized = &self.data[r.start..self.top];
-          unsafe { &*(initialized as *const [MaybeUninit<Value>] as *const [Value]) }
-      }
-  }
-
 pub struct Vm {
-    //stack: Vec<Value>,
-    stack: Stack,
+    stack: Vec<Value>,
     frames: Vec<CallFrame>,
 
     objects: *mut Obj,
-    // TODO: Consider changing HashMaps to be keyed on *mut Obj instead of String
-    // saves string allocations and sticks to pointer equivalence for comparison
-    // will need to thread key *mut Obj into the GC too.
-    strings: HashMap<String, *mut Obj>,
-    globals: HashMap<String, Value>,
+
+    strings: VecMap<String, *mut Obj>,
+    globals: VecMap<*mut Obj, Value>,
     // consider adding
     // natives: HashMap<String, Arc<dyn Fn(&[Value]) -> Result<Value>>>
     // this would add the ability to use closures as native functions
@@ -115,6 +43,8 @@ pub struct Vm {
     bytes_allocated: usize,
     next_gc: usize,
     grey_stack: Vec<*mut Obj>,
+
+    init_string: *mut Obj,
 }
 
 // =============================================================================
@@ -130,12 +60,12 @@ impl Default for Vm {
 impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
-            stack: Stack::default(),//Vec::with_capacity(STACK_MAX),
+            stack: Vec::with_capacity(STACK_MAX),
             frames: Vec::with_capacity(FRAMES_MAX),
 
             objects: std::ptr::null_mut(),
-            strings: HashMap::new(),
-            globals: HashMap::new(),
+            strings: VecMap::default(),
+            globals: VecMap::default(),
 
             open_upvalues: Vec::new(),
 
@@ -146,24 +76,30 @@ impl Vm {
             bytes_allocated: 0,
             next_gc: 1024 * 1024,
             grey_stack: Vec::new(),
+
+            init_string: std::ptr::null_mut(),
         };
+
+        let init_obj = vm.alloc_obj(ObjKind::String(String::from("init")));
+        vm.strings.insert(String::from("init"), init_obj);
+        vm.init_string = init_obj;
 
         vm.define_native("clock", |_args| {
             let secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs_f64();
-            Ok(Value::Number(secs))
+            Ok(Value::from_number(secs))
         });
 
         vm.define_native("sqrt", |args| {
             if args.len() != 1 {
                 bail!("'sqrt' only accepts 1 argument, got: {}", args.len());
             }
-            let Value::Number(x) = args[0] else {
+            if !args[0].is_number() {
                 bail!("'sqrt' only accepts Numbers")
             };
-            Ok(Value::Number(x.sqrt()))
+            Ok(Value::from_number(args[0].as_number().sqrt()))
         });
         vm
     }
@@ -192,13 +128,13 @@ impl Vm {
 
         match compiler.compile() {
             Ok(func_obj) => {
-                self.stack.push(Value::Obj(func_obj));
+                self.stack.push(Value::from_obj(func_obj));
                 let closure = self.alloc_obj(ObjKind::Closure {
                     function: func_obj,
                     upvalues: Vec::new(),
                 });
                 let _ = self.stack.pop();
-                self.stack.push(Value::Obj(closure));
+                self.stack.push(Value::from_obj(closure));
                 self.call(closure, 0);
                 self.run()
             }
@@ -212,18 +148,25 @@ impl Vm {
     }
 
     fn define_native(&mut self, name: &str, native_func: fn(&[Value]) -> Result<Value>) {
-        self.globals
-            .insert(name.to_string(), Value::NativeFunction(native_func));
+        let ptr = if let Some(&existing) = self.strings.get(name) {
+            existing
+        } else {
+            let ptr = self.alloc_obj(ObjKind::String(name.to_string()));
+            self.strings.insert(name.to_string(), ptr);
+            ptr
+        };
+        let native_obj = self.alloc_obj(ObjKind::Native(native_func));
+        self.globals.insert(ptr, Value::from_obj(native_obj));
     }
 
     fn alloc_obj(&mut self, kind: ObjKind) -> *mut Obj {
         self.bytes_allocated += std::mem::size_of::<Obj>() + kind.heap_size();
-        if self.toggle_gc_log {
-            eprintln!(
-                "allocating {} bytes for an object",
-                std::mem::size_of::<Obj>() + kind.heap_size()
-            );
-        }
+        // if self.toggle_gc_log {
+        //     eprintln!(
+        //         "allocating {} bytes for an object",
+        //         std::mem::size_of::<Obj>() + kind.heap_size()
+        //     );
+        // }
         if self.bytes_allocated > self.next_gc {
             self.collect_garbage();
         }
@@ -262,13 +205,7 @@ impl Vm {
         let stack_ptrs: Vec<*mut Obj> = self
             .stack
             .iter()
-            .filter_map(|sv| {
-                if let Value::Obj(ptr) = sv {
-                    Some(*ptr)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|sv| if sv.is_obj() { Some(sv.as_obj()) } else { None })
             .collect();
         for ptr in stack_ptrs {
             self.mark_object(ptr, "Stack");
@@ -284,13 +221,7 @@ impl Vm {
         let global_ptrs: Vec<*mut Obj> = self
             .globals
             .values()
-            .filter_map(|v| {
-                if let Value::Obj(ptr) = v {
-                    Some(*ptr)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|v: &Value| if v.is_obj() { Some(v.as_obj()) } else { None })
             .collect();
         for ptr in global_ptrs {
             self.mark_object(ptr, "Global");
@@ -310,7 +241,7 @@ impl Vm {
             return;
         }
         if self.toggle_gc_log {
-            println!("{source}: {} mark ", Value::Obj(obj));
+            println!("{source}: {} mark ", Value::from_obj(obj));
         }
         obj.marked = true;
 
@@ -318,8 +249,8 @@ impl Vm {
     }
 
     fn mark_value(&mut self, val: Value, source: &str) {
-        if let Value::Obj(ptr) = val {
-            self.mark_object(ptr, source);
+        if val.is_obj() {
+            self.mark_object(val.as_obj(), source);
         }
     }
 
@@ -331,26 +262,21 @@ impl Vm {
 
     fn blacken_object(&mut self, obj: *mut Obj) {
         if self.toggle_gc_log {
-            println!("{:?} blacken {}", obj, Value::Obj(obj));
+            println!("{:?} blacken {}", obj, Value::from_obj(obj));
         }
 
         match unsafe { &(*obj).kind } {
             ObjKind::UpValue { location, .. } => {
-                if let Value::Obj(ptr) = unsafe { **location } {
-                    self.mark_object(ptr, "Trace upvalue");
+                let ptr = unsafe { **location };
+                if ptr.is_obj() {
+                    self.mark_object(ptr.as_obj(), "Trace upvalue");
                 }
             }
             ObjKind::Function { chunk, .. } => {
                 chunk
                     .constants
                     .iter()
-                    .filter_map(|v| {
-                        if let Value::Obj(ptr) = v {
-                            Some(*ptr)
-                        } else {
-                            None
-                        }
-                    })
+                    .filter_map(|v| if v.is_obj() { Some(v.as_obj()) } else { None })
                     .for_each(|o| self.mark_object(o, "Function chunk"));
             }
             ObjKind::Closure { function, upvalues } => {
@@ -360,40 +286,17 @@ impl Vm {
                     .for_each(|uv| self.mark_object(*uv, "Closure Upvalue"));
             }
             ObjKind::Class { methods, .. } => {
-                // let method_ptrs: Vec<*mut Obj> = methods
-                //     .values()
-                //     .filter_map(|v| {
-                //         if let Value::Obj(ptr) = v {
-                //             Some(*ptr)
-                //         } else {
-                //             None
-                //         }
-                //     }).collect();
-                // for ptr in method_ptrs {
-                //     self.mark_object(ptr, "class method");
-                // }
-                methods
-                    .values()
-                    .for_each(|v| self.mark_value(*v, "class method"));
+                methods.iter().for_each(|(k, v)| {
+                    self.mark_object(*k, "class method");
+                    self.mark_value(*v, "class method");
+                });
             }
             ObjKind::ClassInstance { klass, fields } => {
                 self.mark_object(*klass, "Instance class");
-                // let field_ptrs: Vec<_> = fields
-                //     .values()
-                //     .filter_map(|v| {
-                //         if let Value::Obj(ptr) = v {
-                //             Some(*ptr)
-                //         } else {
-                //             None
-                //         }
-                //     })
-                //     .collect();
-                // for ptr in field_ptrs {
-                //     self.mark_object(ptr, "instance fields");
-                // }
-                fields
-                    .values()
-                    .for_each(|v| self.mark_value(*v, "instance fields"));
+                fields.iter().for_each(|(k, v)| {
+                    self.mark_object(*k, "class method");
+                    self.mark_value(*v, "class method");
+                });
             }
             ObjKind::BoundMethod { receiver, method } => {
                 self.mark_value(*receiver, "method receiver");
@@ -434,11 +337,11 @@ impl Vm {
                 }
 
                 if self.toggle_gc_log {
-                    println!("free: {}", Value::Obj(unreached));
+                    println!("free: {}", Value::from_obj(unreached));
                 }
                 let size = size_of::<Obj>() + unsafe { &*unreached }.kind.heap_size();
                 let _ = unsafe { Box::from_raw(unreached) };
-                self.bytes_allocated -= size;
+                self.bytes_allocated = self.bytes_allocated.saturating_sub(size);
             }
         }
     }
@@ -524,14 +427,6 @@ impl Vm {
         let offset = self.read_byte() as usize;
         self.current_chunk().constants[offset]
     }
-
-    fn read_string_constant<'a>(&mut self) -> &'a str {
-        let name = self.read_constant();
-        // SAFETY: name is a Value::Obj pointing to an interned ObjKind::String in the
-        // GC heap. String constants in the chunk are always reachable roots, so this
-        // Obj won't be freed for the duration of this borrow.
-        unsafe { std::mem::transmute(name.as_string().unwrap()) }
-    }
 }
 
 // =============================================================================
@@ -575,7 +470,9 @@ impl Vm {
     }
 
     fn call_value(&mut self, callee: Value, arg_count: u8) -> bool {
-        if let Value::NativeFunction(native) = callee {
+        if callee.is_obj()
+            && let ObjKind::Native(native) = unsafe { &*callee.as_obj() }.kind
+        {
             let args = &self.stack[self.stack.len() - arg_count as usize..];
             match native(args) {
                 Ok(val) => {
@@ -591,26 +488,25 @@ impl Vm {
             }
         }
 
-        let Value::Obj(ptr) = callee else {
+        if !callee.is_obj() {
             self.runtime_error("Can only call objects.");
             return false;
-        };
+        }
+        let ptr = callee.as_obj();
 
         match unsafe { &(*ptr).kind } {
             ObjKind::Function { .. } | ObjKind::Closure { .. } => self.call(ptr, arg_count),
             ObjKind::Class { .. } => {
                 let instance = self.alloc_obj(ObjKind::ClassInstance {
                     klass: ptr,
-                    fields: HashMap::new(),
+                    fields: VecMap::default(),
                 });
                 let slot = self.stack.len() - arg_count as usize - 1;
-                self.stack[slot] = Value::Obj(instance);
+                self.stack[slot] = Value::from_obj(instance);
                 if let ObjKind::Class { methods, .. } = unsafe { &(*ptr).kind }
-                    && let Some(init_val) = methods.get("init")
+                    && let Some(init_val) = methods.get(&self.init_string)
                 {
-                    let Value::Obj(init_ptr) = *init_val else {
-                        unreachable!()
-                    };
+                    let init_ptr = init_val.as_obj();
                     return self.call(init_ptr, arg_count);
                 } else if arg_count > 0 {
                     self.runtime_error(&format!("Expected 0 arguments but got {arg_count}."));
@@ -635,16 +531,14 @@ impl Vm {
         }
     }
 
-    fn invoke(&mut self, name: &str, arg_count: usize) -> bool {
+    fn invoke(&mut self, name: *mut Obj, arg_count: usize) -> bool {
         let receiver = *self.peek_stack(arg_count);
-        let Value::Obj(recv_obj) = receiver else {
-            unreachable!()
-        };
+        let recv_obj = receiver.as_obj();
         let ObjKind::ClassInstance { klass, fields } = &unsafe { &*recv_obj }.kind else {
             self.runtime_error("only instances have methods.");
             return false;
         };
-        if let Some(value) = fields.get(name) {
+        if let Some(value) = fields.get(&name) {
             let bp = self.stack.len() - arg_count - 1;
             self.stack[bp] = *value;
             return self.call_value(*value, arg_count as u8);
@@ -652,16 +546,17 @@ impl Vm {
         self.invoke_from_class(*klass, name, arg_count)
     }
 
-    fn invoke_from_class(&mut self, klass: *mut Obj, name: &str, arg_count: usize) -> bool {
+    fn invoke_from_class(&mut self, klass: *mut Obj, name: *mut Obj, arg_count: usize) -> bool {
         let ObjKind::Class { methods, .. } = &unsafe { &*klass }.kind else {
             unreachable!()
         };
-        if let Some(closure) = methods.get(name)
-            && let Value::Obj(func_ptr) = closure
+        if let Some(closure) = methods.get(&name)
+            && closure.is_obj()
         {
-            self.call(*func_ptr, arg_count as u8)
+            let func_ptr = closure.as_obj();
+            self.call(func_ptr, arg_count as u8)
         } else {
-            self.runtime_error(&format!("Undefined property '{name}'"));
+            self.runtime_error(&format!("Undefined property '{}'", Value::from_obj(name)));
             false
         }
     }
@@ -682,7 +577,7 @@ impl Vm {
 
         let upvalue = self.alloc_obj(ObjKind::UpValue {
             location,
-            closed: Value::Nil,
+            closed: Value::nil(),
         });
         self.open_upvalues.push(upvalue);
         upvalue
@@ -711,7 +606,7 @@ impl Vm {
                 }
                 OpCode::JumpIfFalse => {
                     let offset = self.read_short() as usize;
-                    if is_falsey(*self.peek_stack(0)) {
+                    if self.peek_stack(0).is_falsey() {
                         *self.current_ip_mut() += offset;
                     }
                 }
@@ -727,27 +622,26 @@ impl Vm {
                     }
                 }
                 OpCode::Invoke => {
-                    let method = self.read_string_constant();
+                    let method_val = self.read_constant();
+                    let method_ptr = method_val.as_obj();
                     let arg_count = self.read_byte() as usize;
-                    if !self.invoke(method, arg_count) {
+                    if !self.invoke(method_ptr, arg_count) {
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::SuperInvoke => {
-                    let method = self.read_string_constant();
+                    let method_val = self.read_constant();
+                    let method_ptr = method_val.as_obj();
                     let arg_count = self.read_byte() as usize;
                     let super_val = self.stack.pop().unwrap();
-                    let Value::Obj(super_ptr) = super_val else {
-                        unreachable!()
-                    };
-                    if !self.invoke_from_class(super_ptr, method, arg_count) {
+
+                    let super_ptr = super_val.as_obj();
+                    if !self.invoke_from_class(super_ptr, method_ptr, arg_count) {
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::Closure => {
-                    let Value::Obj(ptr) = self.read_constant() else {
-                        unreachable!()
-                    };
+                    let ptr = self.read_constant().as_obj();
                     // SAFETY: ptr came from read_constant, which copied it from the
                     // constants pool — a live Box::into_raw allocation.
                     assert!(matches!(&unsafe { &*ptr }.kind, ObjKind::Function { .. }));
@@ -783,7 +677,7 @@ impl Vm {
                         function: ptr,
                         upvalues,
                     });
-                    self.stack.push(Value::Obj(closure));
+                    self.stack.push(Value::from_obj(closure));
                 }
                 OpCode::CloseUpvalue => {
                     self.close_upvalues(self.stack.len() - 1);
@@ -804,9 +698,9 @@ impl Vm {
                     let constant = self.read_constant();
                     self.stack.push(constant);
                 }
-                OpCode::Nil => self.stack.push(Value::Nil),
-                OpCode::True => self.stack.push(Value::Boolean(true)),
-                OpCode::False => self.stack.push(Value::Boolean(false)),
+                OpCode::Nil => self.stack.push(Value::nil()),
+                OpCode::True => self.stack.push(Value::from_bool(true)),
+                OpCode::False => self.stack.push(Value::from_bool(false)),
                 OpCode::Pop => {
                     self.stack.pop();
                 }
@@ -821,41 +715,46 @@ impl Vm {
                     self.stack[base + slot] = *self.peek_stack(0);
                 }
                 OpCode::DefineGlobal => {
-                    let key = self.read_string_constant();
-                    self.globals.insert(key.to_string(), *self.peek_stack(0));
+                    let const_val = self.read_constant();
+                    let key = const_val.as_obj();
+                    self.globals.insert(key, *self.peek_stack(0));
                     self.stack.pop();
                 }
                 OpCode::GetGlobal => {
-                    let key = self.read_string_constant();
-                    if let Some(val) = self.globals.get(key) {
+                    let const_val = self.read_constant();
+                    let key = const_val.as_obj();
+                    if let Some(val) = self.globals.get(&key) {
                         self.stack.push(*val);
                     } else {
-                        self.runtime_error(&format!("Undefined variable '{}'", key));
+                        self.runtime_error(&format!("Undefined variable '{}'", const_val));
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::SetGlobal => {
-                    let key = self.read_string_constant();
-                    if self.globals.contains_key(key) {
-                        self.globals.insert(key.to_string(), *self.peek_stack(0));
+                    let const_val = self.read_constant();
+                    let key = const_val.as_obj();
+                    if self.globals.contains_key(&key) {
+                        self.globals.insert(key, *self.peek_stack(0));
                     } else {
-                        self.runtime_error(&format!("Undefined variable '{}'", key));
+                        self.runtime_error(&format!("Undefined variable '{}'", const_val));
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::GetProperty => {
-                    let key = self.read_string_constant();
+                    let const_val = self.read_constant();
+                    let key = const_val.as_obj();
                     let instance = *self.peek_stack(0);
-                    let Value::Obj(inst_ptr) = instance else {
+                    if !instance.is_obj() {
                         self.runtime_error("Only instances have properties.");
                         return InterpretResult::RuntimeError;
                     };
+                    let inst_ptr = instance.as_obj();
                     let ObjKind::ClassInstance { ref fields, klass } = unsafe { &*inst_ptr }.kind
                     else {
                         self.runtime_error("Only instances have properties.");
                         return InterpretResult::RuntimeError;
                     };
-                    if let Some(&val) = fields.get(key) {
+                    if let Some(&val) = fields.get(&key) {
                         self.stack.pop();
                         self.stack.push(val);
                     } else if !self.bind_method(klass, key) {
@@ -864,17 +763,20 @@ impl Vm {
                 }
                 OpCode::SetProperty => {
                     let instance = *self.peek_stack(1);
-                    let key = self.read_string_constant();
-                    let Value::Obj(inst_ptr) = instance else {
-                        unreachable!()
-                    };
+                    let const_val = self.read_constant();
+                    let key = const_val.as_obj();
+                    let inst_ptr = instance.as_obj();
                     let ObjKind::ClassInstance { ref mut fields, .. } =
                         unsafe { &mut *inst_ptr }.kind
                     else {
                         self.runtime_error("Only instances have properties.");
                         return InterpretResult::RuntimeError;
                     };
-                    fields.insert(key.to_string(), *self.peek_stack(0));
+                    let is_new = !fields.contains_key(&key);
+                    fields.insert(key, *self.peek_stack(0));
+                    if is_new {
+                        self.bytes_allocated += size_of::<*mut Obj>() + size_of::<Value>();
+                    }
                     let value = self.stack.pop().unwrap();
                     let _ = self.stack.pop();
                     self.stack.push(value);
@@ -882,7 +784,7 @@ impl Vm {
                 OpCode::Equal => {
                     let y = self.stack.pop().unwrap();
                     let x = self.stack.pop().unwrap();
-                    self.stack.push(Value::Boolean(x == y));
+                    self.stack.push(Value::from_bool(x == y));
                 }
                 OpCode::GetUpValue => {
                     let slot = self.read_byte() as usize;
@@ -917,32 +819,31 @@ impl Vm {
                     };
                 }
                 OpCode::GetSuper => {
-                    let name = self.read_string_constant();
+                    let const_val = self.read_constant();
+                    let key = const_val.as_obj();
                     let super_val = self.stack.pop().unwrap();
-                    let Value::Obj(super_ptr) = super_val else {
-                        unreachable!()
-                    };
+                    let super_ptr = super_val.as_obj();
                     assert!(matches!(
                         &unsafe { &*super_ptr }.kind,
                         ObjKind::Class { .. }
                     ));
                     // using bind_method with the super class as opposed to the instance's class
-                    if !self.bind_method(super_ptr, name) {
+                    if !self.bind_method(super_ptr, key) {
                         return InterpretResult::RuntimeError;
                     }
                 }
                 OpCode::Greater => {
                     let y = self.stack.pop().unwrap();
                     let x = self.stack.pop().unwrap();
-                    self.stack.push(Value::Boolean(x > y));
+                    self.stack.push(Value::from_bool(x > y));
                 }
                 OpCode::Less => {
                     let y = self.stack.pop().unwrap();
                     let x = self.stack.pop().unwrap();
-                    self.stack.push(Value::Boolean(x < y));
+                    self.stack.push(Value::from_bool(x < y));
                 }
                 OpCode::Negate => {
-                    if !matches!(self.peek_stack(0), Value::Number(_)) {
+                    if !self.peek_stack(0).is_number() {
                         self.runtime_error("operand must be a number");
                         return InterpretResult::RuntimeError;
                     }
@@ -950,14 +851,9 @@ impl Vm {
                     self.stack.push(-popped);
                 }
                 OpCode::Add => {
-                    let both_numbers = matches!(
-                        (self.peek_stack(0), self.peek_stack(1)),
-                        (Value::Number(_), Value::Number(_))
-                    );
-                    let both_objects = matches!(
-                        (self.peek_stack(0), self.peek_stack(1)),
-                        (Value::Obj(_), Value::Obj(_))
-                    );
+                    let both_numbers =
+                        self.peek_stack(0).is_number() && self.peek_stack(1).is_number();
+                    let both_objects = self.peek_stack(0).is_obj() && self.peek_stack(1).is_obj();
                     if both_numbers {
                         let y = self.stack.pop().unwrap();
                         let x = self.stack.pop().unwrap();
@@ -973,10 +869,7 @@ impl Vm {
                     }
                 }
                 OpCode::Subtract => {
-                    if !matches!(
-                        (self.peek_stack(0), self.peek_stack(1)),
-                        (Value::Number(_), Value::Number(_))
-                    ) {
+                    if !(self.peek_stack(0).is_number() && self.peek_stack(1).is_number()) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -985,10 +878,7 @@ impl Vm {
                     self.stack.push(x - y);
                 }
                 OpCode::Multiply => {
-                    if !matches!(
-                        (self.peek_stack(0), self.peek_stack(1)),
-                        (Value::Number(_), Value::Number(_))
-                    ) {
+                    if !(self.peek_stack(0).is_number() && self.peek_stack(1).is_number()) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -997,10 +887,7 @@ impl Vm {
                     self.stack.push(x * y);
                 }
                 OpCode::Divide => {
-                    if !matches!(
-                        (self.peek_stack(0), self.peek_stack(1)),
-                        (Value::Number(_), Value::Number(_))
-                    ) {
+                    if !(self.peek_stack(0).is_number() && self.peek_stack(1).is_number()) {
                         self.runtime_error("operands must be numbers");
                         return InterpretResult::RuntimeError;
                     }
@@ -1010,39 +897,37 @@ impl Vm {
                 }
                 OpCode::Not => {
                     let top = self.stack.pop().unwrap();
-                    self.stack.push(Value::Boolean(is_falsey(top)));
+                    self.stack.push(Value::from_bool(top.is_falsey()));
                 }
                 OpCode::Print => {
                     println!("{}", self.stack.pop().unwrap());
                 }
                 OpCode::Class => {
                     let thing = self.read_constant();
-                    let Value::Obj(ptr) = thing else {
-                        unreachable!()
-                    };
+                    let ptr = thing.as_obj();
                     let ObjKind::String(name) = &(unsafe { &*ptr }.kind) else {
                         unreachable!()
                     };
                     let ptr = self.alloc_obj(ObjKind::Class {
                         name: name.clone(),
-                        methods: HashMap::new(),
+                        methods: VecMap::default(),
                     });
-                    self.stack.push(Value::Obj(ptr));
+                    self.stack.push(Value::from_obj(ptr));
                 }
                 OpCode::Method => {
-                    let key = self.read_string_constant();
-                    self.define_method(key);
+                    let method_val = self.read_constant();
+                    let method_ptr = method_val.as_obj();
+                    self.define_method(method_ptr);
                 }
                 OpCode::Inherit => {
                     let super_class = *self.peek_stack(1);
                     let sub_class = *self.peek_stack(0);
-                    let Value::Obj(super_ptr) = super_class else {
+                    if !super_class.is_obj() {
                         self.runtime_error("Superclass must be a class.");
                         return InterpretResult::RuntimeError;
-                    };
-                    let Value::Obj(sub_ptr) = sub_class else {
-                        unreachable!()
-                    };
+                    }
+                    let super_ptr = super_class.as_obj();
+                    let sub_ptr = sub_class.as_obj();
                     let ObjKind::Class {
                         methods: super_methods,
                         ..
@@ -1057,7 +942,7 @@ impl Vm {
                     else {
                         unreachable!()
                     };
-                    sub_methods.extend(super_methods.iter().map(|(k, v)| (k.clone(), *v)));
+                    sub_methods.extend(super_methods);
                     let _ = self.stack.pop(); // pops the subclass off the vm stack
                 }
             }
@@ -1065,10 +950,10 @@ impl Vm {
     }
 
     fn concatenate(&mut self) -> bool {
-        let (p1, p2) = match (self.peek_stack(0), self.peek_stack(1)) {
-            (Value::Obj(p1), Value::Obj(p2)) => (*p1, *p2),
-            _ => return false,
-        };
+        if !(self.peek_stack(0).is_obj() && self.peek_stack(1).is_obj()) {
+            return false;
+        }
+        let (p1, p2) = (self.peek_stack(0).as_obj(), self.peek_stack(1).as_obj());
         // SAFETY: p1 and p2 were copied from Value::Obj entries on the stack,
         // both of which are live Box::into_raw allocations.
         let is_strings = unsafe {
@@ -1081,12 +966,8 @@ impl Vm {
             return false;
         }
 
-        let Value::Obj(ptr2) = *self.peek_stack(0) else {
-            panic!("invalid obj type")
-        };
-        let Value::Obj(ptr1) = *self.peek_stack(1) else {
-            panic!("invalid obj type")
-        };
+        let ptr2 = self.peek_stack(0).as_obj();
+        let ptr1 = self.peek_stack(1).as_obj();
         // SAFETY: ptr1/ptr2 were just popped from the stack; is_strings confirmed they
         // are live string objects. No other references exist after the pop.
         let (obj1, obj2) = unsafe { (&*ptr1, &*ptr2) };
@@ -1096,7 +977,7 @@ impl Vm {
                 if let Some(&ptr) = self.strings.get(&result) {
                     let _ = self.stack.pop(); // pop ptr2 off the stack
                     let _ = self.stack.pop(); // pop ptr1 off the stack
-                    self.stack.push(Value::Obj(ptr));
+                    self.stack.push(Value::from_obj(ptr));
                     return true;
                 }
                 let ptr = self.alloc_obj(ObjKind::String(result.clone()));
@@ -1104,7 +985,7 @@ impl Vm {
                 self.strings.insert(result, ptr);
                 let _ = self.stack.pop(); // pop ptr2 off the stack
                 let _ = self.stack.pop(); // pop ptr1 off the stack
-                self.stack.push(Value::Obj(ptr));
+                self.stack.push(Value::from_obj(ptr));
             }
             _ => panic!("invalid object types!"),
         }
@@ -1146,21 +1027,17 @@ impl Vm {
         })
     }
 
-    fn define_method(&mut self, method_name: &str) {
+    fn define_method(&mut self, name_ptr: *mut Obj) {
         let method_val = self.peek_stack(0);
         let klass_val = self.peek_stack(1);
 
-        let Value::Obj(method_ptr) = *method_val else {
-            unreachable!()
-        };
-        let Value::Obj(klass_ptr) = *klass_val else {
-            unreachable!()
-        };
+        let method_ptr = method_val.as_obj();
+        let klass_ptr = klass_val.as_obj();
 
         if let ObjKind::Closure { .. } = unsafe { &(*method_ptr).kind }
             && let ObjKind::Class { methods, .. } = unsafe { &mut (*klass_ptr).kind }
         {
-            methods.insert(method_name.to_string(), *method_val);
+            methods.insert(name_ptr, *method_val);
         } else {
             self.runtime_error("method declarations must be functions");
         }
@@ -1168,29 +1045,23 @@ impl Vm {
         self.stack.pop();
     }
 
-    fn bind_method(&mut self, klass: *mut Obj, key: &str) -> bool {
+    fn bind_method(&mut self, klass: *mut Obj, key: *mut Obj) -> bool {
         let ObjKind::Class { methods, .. } = &unsafe { &*klass }.kind else {
             unreachable!()
         };
-        if let Some(method) = methods.get(key).copied() {
+        if let Some(method) = methods.get(&key).copied() {
             let receiver = *self.peek_stack(0);
-            let Value::Obj(method_ptr) = method else {
-                unreachable!()
-            };
+            let method_ptr = method.as_obj();
             let ptr = self.alloc_obj(ObjKind::BoundMethod {
                 receiver,
                 method: method_ptr,
             });
             let _ = self.stack.pop(); // pop the instance off the stack
-            self.stack.push(Value::Obj(ptr));
+            self.stack.push(Value::from_obj(ptr));
             true
         } else {
-            self.runtime_error(&format!("undefined property '{key}'."));
+            self.runtime_error(&format!("undefined property '{}'.", Value::from_obj(key)));
             false
         }
     }
-}
-
-fn is_falsey(val: Value) -> bool {
-    matches!(val, Value::Nil | Value::Boolean(false))
 }
