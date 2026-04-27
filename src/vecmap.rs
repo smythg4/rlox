@@ -100,7 +100,6 @@ pub fn keys(&self) -> Box<dyn Iterator<Item = &K> + '_> {
     }
 
     fn into_large(&mut self) {
-        eprintln!("DEBUG: Jumping up to large VecMap");
         let inner = match self {
             VecMap::Small(vm) => std::mem::take(vm),
             _ => return,

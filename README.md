@@ -55,7 +55,7 @@ rlox
 # Flags
 -d, --debug          Print bytecode disassembly before execution
 -t, --tracing        Trace stack and instruction at runtime
--g, --gc-logging     Print GC activity (allocations, collections, frees)
+-g, --gc-logging     Print GC activity (collections and frees)
 ```
 
 ## Implementation
